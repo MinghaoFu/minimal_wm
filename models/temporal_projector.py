@@ -42,6 +42,9 @@ class TemporalProjector(nn.Module):
         output_patches=49,
         output_dim=None,  # will use out_features if provided
 
+        # Temporal processing options
+        use_history=True,  # 是否使用历史信息
+
         # ViT parameters
         hidden_dim=512,   # 共同的hidden维度
         depth=4,          # Transformer层数
@@ -71,6 +74,7 @@ class TemporalProjector(nn.Module):
         self.output_patches = output_patches
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
+        self.use_history = use_history
 
         # 简化版本：只需要x的投影
         self.x_input_proj = nn.Linear(x_dim, hidden_dim)
@@ -98,55 +102,87 @@ class TemporalProjector(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # 可选的patch数量调整层
-        if z_patches != output_patches:
+        # patch数量调整层：从x_patches压缩到output_patches
+        if x_patches != output_patches:
             self.patch_adjust = PatchAdjustment(
-                input_patches=z_patches,
-                output_patches=output_patches,
+                input_patches=x_patches,  # 196 patches from x_t
+                output_patches=output_patches,  # 49 patches for z_t
                 dim=output_dim
             )
         else:
             self.patch_adjust = nn.Identity()
 
-    def forward(self, x_sequence):
+    def forward(self, x_sequence, z_history=None):
         """
-        简化版本：直接将x_t投影到z_t，不使用历史信息
+        Temporal projector with cumulative historical z states
+
+        Logic: z_t = f(x_t, z_{t-3}, z_{t-2}, z_{t-1})
+        - z1 ← f(x1, 0, 0, 0) - pad with zeros
+        - z2 ← f(x2, z1, 0, 0) - pad with zeros
+        - z3 ← f(x3, z1, z2, 0) - pad with zeros
+        - z4 ← f(x4, z1, z2, z3) - full history
 
         Args:
-            x_sequence: (b, t, x_patches, x_dim) - 整个序列的visual+proprio embedding
-                       对于concat_dim=1: (b, t, 196, 416) - 每个patch都有visual+proprio
+            x_sequence: (b, t, x_patches, x_dim) - visual+proprio embedding sequence
+            z_history: Not used - we maintain history internally
 
         Returns:
-            z_sequence: (b, t, output_patches, output_dim) - 整个序列的projected space
-                       (b, t, 196, 64) - 直接从x_t得到z_t
+            z_sequence: (b, t, output_patches, output_dim) - projected sequence
         """
         b, t, x_patches, x_dim = x_sequence.shape
+        z_outputs = []
+        z_states = []  # Store all computed z states
 
-        # 简单投影：直接处理所有时间步
-        # Reshape: (b, t, x_patches, x_dim) -> (b*t, x_patches, x_dim)
-        x_flat = x_sequence.view(b * t, x_patches, x_dim)
+        for i in range(t):
+            x_t = x_sequence[:, i]  # (b, x_patches, x_dim)
 
-        # 投影到hidden维度
-        x_proj = self.x_input_proj(x_flat)  # (b*t, x_patches, hidden_dim)
+            if self.use_history:
+                # Build history for current timestep
+                if i == 0:
+                    # z1: use 3 zero padding
+                    z_hist = torch.zeros(b, self.num_hist, self.output_patches, self.output_dim,
+                                       device=x_sequence.device, dtype=x_sequence.dtype)
+                elif i == 1:
+                    # z2: use z1 + 2 zero padding
+                    z_hist = torch.cat([
+                        z_states[0].unsqueeze(1),  # z1
+                        torch.zeros(b, 2, self.output_patches, self.output_dim,
+                                  device=x_sequence.device, dtype=x_sequence.dtype)
+                    ], dim=1)
+                elif i == 2:
+                    # z3: use z1, z2 + 1 zero padding
+                    z_hist = torch.cat([
+                        torch.stack(z_states[:2], dim=1),  # z1, z2
+                        torch.zeros(b, 1, self.output_patches, self.output_dim,
+                                  device=x_sequence.device, dtype=x_sequence.dtype)
+                    ], dim=1)
+                else:
+                    # z4+: use last 3 z states
+                    z_hist = torch.stack(z_states[i-3:i], dim=1)  # z_{t-3}, z_{t-2}, z_{t-1}
 
-        # 添加位置编码
-        x_proj = x_proj + self.x_pos_embedding
+                # TODO: Process x_t with history context using cross-modal attention
+                # For now, just process x_t independently
+                x_proj = self.x_input_proj(x_t)  # (b, x_patches, hidden_dim)
+            else:
+                # Simple mode: just process x_t without history
+                x_proj = self.x_input_proj(x_t)  # (b, x_patches, hidden_dim)
 
-        # 添加dropout
-        x_proj = self.dropout(x_proj)
+            x_proj = x_proj + self.x_pos_embedding
+            x_proj = self.dropout(x_proj)
 
-        # ViT Transformer处理
-        x_proj = self.transformer(x_proj)  # (b*t, x_patches, hidden_dim)
+            # ViT processing
+            x_proj = self.transformer(x_proj)  # (b, x_patches, hidden_dim)
 
-        # 输出投影
-        z_out = self.output_proj(x_proj)  # (b*t, x_patches, output_dim)
+            # Output projection and patch adjustment
+            z_t = self.output_proj(x_proj)  # (b, x_patches, output_dim)
+            z_t = self.patch_adjust(z_t)     # (b, output_patches, output_dim)
 
-        # Patch数量调整（如果需要）
-        z_out = self.patch_adjust(z_out)  # (b*t, output_patches, output_dim)
+            z_outputs.append(z_t)
+            if self.use_history:
+                z_states.append(z_t)  # Store for future history only if using history
 
-        # 重塑回时序维度
-        z_sequence = z_out.view(b, t, self.output_patches, self.output_dim)
-
+        # Stack outputs
+        z_sequence = torch.stack(z_outputs, dim=1)  # (b, t, output_patches, output_dim)
         return z_sequence
 
 

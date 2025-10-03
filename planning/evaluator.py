@@ -172,21 +172,14 @@ class PlanEvaluator:  # evaluator for planning
         mean_proprio_dist = np.mean(proprio_dists)
 
         e_obs = move_to_device(self.preprocessor.transform_obs(e_obs), self.device)
-        # Create dummy actions for encoding (environment observations don't need real actions)
-        batch_size = e_obs['visual'].shape[0]
-        seq_len = e_obs['visual'].shape[1]
-        dummy_actions = torch.zeros(batch_size, seq_len, 10, device=self.device)
-        e_z_comp, e_z_obs = self.wm.encode(e_obs, dummy_actions)
-        # Extract first 64D projected features for comparison (exclude actions)
-        e_projected = e_z_comp[:, :, :, :64]  # Environment projected features (64D)
-        i_projected = i_z_obs["projected"]  # Rollout projected features (64D)
+        e_z_obs = self.wm.encode_obs_projected(e_obs)
         
-        div_compress_emb = torch.norm(e_projected - i_projected).item()
+        div_projected_emb = torch.norm(e_z_obs["projected"] - i_z_obs["projected"]).item()
 
         logs.update({
             "mean_visual_dist": mean_visual_dist,
             "mean_proprio_dist": mean_proprio_dist,
-            "mean_div_compress_emb": div_compress_emb,
+            "mean_div_projected_emb": div_projected_emb,
         })
 
         return logs, successes
@@ -246,9 +239,8 @@ class PlanEvaluator:  # evaluator for planning
 
         # pad i_visuals or subsample e_visuals
         if not self.plot_full:
-            # Ensure both have the same length after subsampling
-            n_frames = i_visuals.shape[1]  # Use world model length as reference
-            e_visuals = e_visuals[:, :n_frames*self.frameskip:self.frameskip]  # Subsample to match
+            e_visuals = e_visuals[:, :: self.frameskip]
+            i_visuals = i_visuals[:, :: self.frameskip]
 
         n_columns = e_visuals.shape[1]
         assert (

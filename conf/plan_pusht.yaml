@@ -38,7 +38,7 @@ objective:
   _target_: planning.objectives.create_objective_fn
   alpha: 1
   base: 2
-  mode: last
+  mode: projected_last
 
 planner:
   _target_: planning.mpc.MPCPlanner

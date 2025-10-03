@@ -6,6 +6,7 @@ import random
 import torch
 import pickle
 import wandb
+wandb.login(key="02f68fdb3367f7ff8ef0fd961bd1758e6e57dd24")
 import logging
 import warnings
 import numpy as np
@@ -16,10 +17,13 @@ from einops import rearrange
 from omegaconf import OmegaConf, open_dict
 
 from env.venv import SubprocVectorEnv
-from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
 from utils import cfg_to_dict, seed
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from PIL import Image
+import cv2
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -30,6 +34,7 @@ ALL_MODEL_KEYS = [
     "decoder",
     "proprio_encoder",
     "action_encoder",
+    'post_concat_projection',
 ]
 
 def planning_main_in_dir(working_dir, cfg_dict):
@@ -332,6 +337,41 @@ class PlanWorkspace:
             obs_g=self.obs_g,
             actions=actions_init,
         )
+        
+        # ## 
+        # from utils import move_to_device
+        # from einops import rearrange, repeat
+        
+        # trans_obs_0 = move_to_device(
+        #     self.planner.preprocessor.transform_obs(self.obs_0), self.planner.device
+        # )
+        # trans_obs_g = move_to_device(
+        #     self.planner.preprocessor.transform_obs(self.obs_g), self.planner.device
+        # )
+
+        # for traj in range(actions.shape[0]):
+        #     cur_trans_obs_0 = {
+        #         key: repeat(
+        #             arr[traj].unsqueeze(0), "1 ... -> n ...", n=1
+        #         )
+        #         for key, arr in trans_obs_0.items()
+        #     }
+        #     cur_trans_obs_g = {
+        #         key: repeat(
+        #             arr[traj].unsqueeze(0), "1 ... -> n ...", n=1
+        #         )
+        #         for key, arr in trans_obs_g.items()
+        #     }
+            
+        #     i_z_obses, i_zs = self.wm.rollout(obs_0=cur_trans_obs_0, act=actions[traj].unsqueeze(0))
+        #     env_obs_list = []
+        #     for action_step in range(actions[traj].shape[1]):
+        #         o, r, d, info = self.env.step(actions[:,action_step])
+        #         env_obs_list.append(o["visual"])
+
+        #     env_obs = np.concatenate(env_obs_list, axis=0)
+            
+        
         logs, successes, _, _ = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
@@ -393,6 +433,16 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     elif not train_cfg.has_decoder:
         result["decoder"] = None
 
+    # Load post_concat_projection
+    if "post_concat_projection" not in result:
+        projection_input_dim = train_cfg.encoder_emb_dim + train_cfg.proprio_emb_dim * train_cfg.num_proprio_repeat
+        result["post_concat_projection"] = hydra.utils.instantiate(
+            train_cfg.projector,
+            in_features=projection_input_dim,
+            out_features=train_cfg.projected_dim,
+            act_embed_dim=train_cfg.action_emb_dim,
+        )
+
     model = hydra.utils.instantiate(
         train_cfg.model,
         encoder=result["encoder"],
@@ -400,6 +450,7 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         action_encoder=result["action_encoder"],
         predictor=result["predictor"],
         decoder=result["decoder"],
+        post_concat_projection=result["post_concat_projection"],
         proprio_dim=train_cfg.proprio_emb_dim,
         action_dim=train_cfg.action_emb_dim,
         concat_dim=train_cfg.concat_dim,
@@ -439,7 +490,7 @@ def planning_main(cfg_dict):
         wandb_run = None
 
     ckpt_base_path = cfg_dict["ckpt_base_path"]
-    model_path = f"{ckpt_base_path}/outputs/{cfg_dict['model_name']}/"
+    model_path = f"{ckpt_base_path}/outputs_{cfg_dict['env']}/{cfg_dict['model_name']}/"
     with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
         model_cfg = OmegaConf.load(f)
 

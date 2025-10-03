@@ -39,14 +39,10 @@ class VWorldModel(nn.Module):
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
-        self.alignment_dim = alignment_dim  # Store alignment dimension for InfoNCE
         self.num_action_repeat = num_action_repeat
         self.num_proprio_repeat = num_proprio_repeat
         self.proprio_dim = proprio_dim * num_proprio_repeat 
-        if alignment_dim is None:
-            self.alignment_dim = self.proprio_dim
-        else:
-            self.alignment_dim = alignment_dim # can set manually for partial alignment
+        self.alignment_dim = min(self.proprio_dim, projected_dim)
         self.action_dim = action_dim * num_action_repeat 
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
 
@@ -150,32 +146,52 @@ class VWorldModel(nn.Module):
                 )  # (b, num_frames, num_patches + 2, 384)
             # Apply projection only to visual + proprio (exclude action): 384D -> 64D
             z_visual_proprio = torch.cat([z_dct['visual'], z_dct['proprio'].unsqueeze(2)], dim=2)
-            z_projected = self.post_concat_projection(z_visual_proprio)  # (b, num_frames, num_patches + 1, 64)
+            z_projected = self.post_concat_projection(z_concat)  # (b, num_frames, num_patches + 1, 64)
             return z_projected, z_dct
         if self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            z_visual_proprio = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
-            z_projected = self.post_concat_projection(z_visual_proprio) 
-            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_projected.shape[2])
+            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            # lag_act_repeated = torch.zeros_like(act_repeated).to(act_repeated.device)
+            # lag_act_repeated[:, 1:, :, :] = act_repeated[:, :-1, :, :]
+            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
+            z_projected = self.post_concat_projection(o, act_repeated) 
             z = torch.cat([z_projected, act_repeated], dim=3) 
         return z, z_dct
     
-    def encode_to_projected(self, obs):
+    def encode_to_projected(self, obs, act):
+        z_dct = self.encode_obs(obs)
+        act_emb = self.encode_act(act)
         if self.concat_dim == 0:
-            z_dct = self.encode_obs(obs)
             z_visual_proprio = torch.cat([z_dct['visual'], z_dct['proprio'].unsqueeze(2)], dim=2)
             z_projected = self.post_concat_projection(z_visual_proprio) 
             return {"projected": z_projected}
         elif self.concat_dim == 1:
-            z_dct = self.encode_obs(obs)
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            z_visual_proprio = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
+            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            # lag_act_repeated = torch.zeros_like(act_repeated).to(act_repeated.device)
+            # lag_act_repeated[:, 1:, :, :] = act_repeated[:, :-1, :, :]
+            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
+            z_projected = self.post_concat_projection(o, act_repeated) 
+            z = torch.cat([z_projected, act_repeated], dim=3) 
+            return {"projected": z_projected}
+        
+    def encode_obs_projected(self, obs):
+        z_dct = self.encode_obs(obs)
+        if self.concat_dim == 0:
+            z_visual_proprio = torch.cat([z_dct['visual'], z_dct['proprio'].unsqueeze(2)], dim=2)
             z_projected = self.post_concat_projection(z_visual_proprio) 
             return {"projected": z_projected}
-
+        elif self.concat_dim == 1:
+            proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
+            proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
+            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
+            z_projected = self.post_concat_projection(o, None) 
+            return {"projected": z_projected}
+        
     def encode_act(self, act):
         act = self.action_encoder(act) # (b, num_frames, action_emb_dim)
         return act
@@ -205,6 +221,8 @@ class VWorldModel(nn.Module):
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
         """
+        z_projected = z[:, :, :, :self.projected_dim]
+        z_action = z[:, :, :, self.projected_dim:]
         T = z.shape[1]
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
@@ -333,11 +351,11 @@ class VWorldModel(nn.Module):
         z, z_dct = self.encode(obs, act)  
         
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, 64)
-        z_tgt = z[:, self.num_hist :, :, :]  # (b, num_pred, num_patches, 64)
+        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, 64)
         
         visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
-        visual_tgt = obs['visual'][:, self.num_hist :, ...]  # (b, num_pred, 3, img_size, img_size)
-
+        visual_tgt = obs['visual'][:, self.num_pred :, ...]  # (b, num_hist, 3, img_size, img_size)
+        
         if self.predictor is not None:
             z_pred = self.predict(z_src)
             if self.decoder is not None:
@@ -553,9 +571,6 @@ class VWorldModel(nn.Module):
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         
-        # Include dummy proprio for compatibility with decode_obs
-        b, t, patches, _ = z.shape
-        dummy_proprio = torch.zeros(b, t, 7, device=z.device)  # Standard proprio dimension
         z_obses = {
             "projected": z[:, :, :, :self.projected_dim], 
         } 

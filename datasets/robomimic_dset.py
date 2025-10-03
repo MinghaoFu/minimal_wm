@@ -102,6 +102,7 @@ class RobomimicDataset(TrajDataset):
                 self.proprio_mean = torch.load(self.data_path / "proprio_mean.pth")
                 self.proprio_std = torch.load(self.data_path / "proprio_std.pth")
             except FileNotFoundError:
+                raise FileNotFoundError("Statistics file not found in robomimic dataset!")
                 print("Using default statistics for robomimic dataset")
                 self.action_mean = ACTION_MEAN[:self.action_dim]
                 self.action_std = ACTION_STD[:self.action_dim]

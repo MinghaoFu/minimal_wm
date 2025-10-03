@@ -3,15 +3,18 @@
 
 _target_: models.temporal_projector.TemporalProjector
 
-# Input dimensions for Robomimic
+# Input dimensions for Robomimic with patch compression
 # in_features and out_features will be passed dynamically at runtime
 num_hist: 3          # 使用前3个历史z states作为输入
-z_patches: 196       # z_{t-i} patch数量 (14x14, NO compression)
+z_patches: 49        # z_{t-i} patch数量 (7x7, compressed)
 z_dim: 64            # z_{t-i} feature维度 (64)
 x_patches: 196       # x_t patch数量 (14x14, DINO patches)
 
-# Output dimensions
-output_patches: 196  # 输出patch数量 (14x14, NO compression)
+# Output dimensions with compression
+output_patches: 49   # 输出patch数量 (7x7, compressed)
+
+# Temporal processing options
+use_history: true    # 是否使用历史信息 (启用历史功能)
 
 # ViT architecture parameters
 hidden_dim: 256      # 共同的hidden维度

@@ -10,8 +10,9 @@ n_res_channel: 128
 quantize: False
 emb_dim: 64  # Input dimension (projected_dim)
 
-# Patch alignment configuration
-# First: upsample patches 7x7 -> 14x14 (49 -> 196 patches)
-# Then: standard vqvae processing (14x14 -> 224x224)
-upsample_stride: 2  # Patch alignment: 7x7 -> 14x14 patches
-decode_stride: 4    # Standard processing: 14x14 -> 224x224 (same as vqvae)
+# Patch alignment configuration for 7x7 patches (49 total)
+# Step 1: Expand patches 7x7 -> 56x56 (stride=8)
+# Step 2: Final decode 56x56 -> 224x224 (stride=4)
+# Total: 7 * 32 = 224 (perfect match!)
+upsample_stride: 8  # 7x7 -> 56x56
+decode_stride: 4    # 56x56 -> 224x224 (正确输出尺寸)

@@ -65,14 +65,18 @@ def create_objective_fn(alpha, base, mode="last", projected_dim=64):
             loss: tensor (B, )
         """
         # Use projected features directly from the dict
-        pred_projected = z_obs_pred["projected"][:, -1:, :, :]  # Final timestep, projected_dim
-        tgt_projected = z_obs_tgt["projected"]  # Goal, projected_dim features only
-        
-        # Compute MSE loss in projected space
-        loss_projected = metric(pred_projected, tgt_projected).mean(
-            dim=tuple(range(1, pred_projected.ndim))
+        """
+        Args:
+            z_obs_pred: dict, {'visual': (B, T, *D_visual), 'proprio': (B, T, *D_proprio)}
+            z_obs_tgt: dict, {'visual': (B, T, *D_visual), 'proprio': (B, T, *D_proprio)}
+        Returns:
+            loss: tensor (B, )
+        """
+        loss_projected = metric(z_obs_pred["projected"][:, -1:], z_obs_tgt["projected"]).mean(
+            dim=tuple(range(1, z_obs_pred["projected"].ndim))
         )
-        return loss_projected
+        loss = loss_projected 
+        return loss
         
     def objective_fn_projected_all(z_obs_pred, z_obs_tgt):
         """
@@ -87,20 +91,16 @@ def create_objective_fn(alpha, base, mode="last", projected_dim=64):
             [base**i for i in range(z_obs_pred["projected"].shape[1])], dtype=np.float32
         )
         coeffs = torch.tensor(coeffs / np.sum(coeffs)).to(z_obs_pred["projected"].device)
-        
-        # Use projected features directly from the dict
-        pred_projected = z_obs_pred["projected"]  # All timesteps, projected_dim
-        tgt_projected = z_obs_tgt["projected"]  # Goal, projected_dim features only
-        
-        # Compute MSE loss in projected space for all frames
-        loss_projected = metric(pred_projected, tgt_projected).mean(
-            dim=tuple(range(2, pred_projected.ndim))
+        loss_visual = metric(z_obs_pred["projected"], z_obs_tgt["projected"]).mean(
+            dim=tuple(range(2, z_obs_pred["visual"].ndim))
         )
-        loss_projected = (loss_projected * coeffs).mean(dim=1)
-        return loss_projected
+        loss_visual = (loss_visual * coeffs).mean(dim=1)
+        loss = loss_visual 
+        return loss
 
     if mode == "last":
-        return objective_fn_last
+        return objective_fn_projected_last
+        # return objective_fn_last # temporal hardcode
     elif mode == "all":
         return objective_fn_all
     elif mode == "projected_last":

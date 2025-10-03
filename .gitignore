@@ -1,12 +1,49 @@
 # Exclude large files and outputs
 outputs/
+outputs_*/
 plan_outputs/
+pusht_outputs/
 wandb/
+checkpoints/
+
+# Model and data files
 *.pth
 *.pkl
+*.mp4
+*.avi
+*.hdf5
+*.h5
+*.npz
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# System files
 .DS_Store
+*.swp
+*.swo
+*~
+
+# Logs
 *.log
 *.out
 *.err
+nohup.out
+
+# Temporary files
+/tmp/
+*.tmp
+*.bak
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# Hydra outputs
+.hydra/
+multirun/

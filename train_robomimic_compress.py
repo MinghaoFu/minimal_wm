@@ -3,7 +3,7 @@ import time
 import hydra
 import torch
 import wandb
-wandb.login(key="792a3b819c6b832d0087bd4905542a95c7236076")
+wandb.login(key="02f68fdb3367f7ff8ef0fd961bd1758e6e57dd24")
 import logging
 import warnings
 import threading
@@ -95,8 +95,8 @@ class Trainer:
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             # Set wandb API key and login
-            os.environ["WANDB_API_KEY"] = "792a3b819c6b832d0087bd4905542a95c7236076"
-            wandb.login(key="792a3b819c6b832d0087bd4905542a95c7236076")
+            os.environ["WANDB_API_KEY"] = "02f68fdb3367f7ff8ef0fd961bd1758e6e57dd24"
+            wandb.login(key="02f68fdb3367f7ff8ef0fd961bd1758e6e57dd24")
             
             wandb_run_id = None
             if os.path.exists("hydra.yaml"):
@@ -108,14 +108,15 @@ class Trainer:
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
                 self.wandb_run = wandb.init( 
-                    project="dino_wm_debug",
+                    project="minimal_wm",
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
                 )
             else:
                 self.wandb_run = wandb.init(
-                    project="dino_wm_align_recon",  # 
+                    project="minimal_wm",
+                    entity="minghao_workaholic", # TODO: add entitiy to all the wandb init in the code
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
@@ -184,6 +185,7 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
+        self._keys_to_save += ["post_concat_projection"]
 
         self.init_models()
         self.init_optimizers()
@@ -254,6 +256,7 @@ class Trainer:
             self.cfg.projector,
             in_features=self.projection_input_dim,
             out_features=self.cfg.projected_dim,
+            act_embed_dim=self.cfg.action_emb_dim,
         )
         self.post_concat_projection = self.accelerator.prepare(self.post_concat_projection)
 
@@ -355,7 +358,7 @@ class Trainer:
                 self.model.alignment_feature_selection = 'isolate'  # Default: isolate first 64 dims
         
         self.model = self.model.to(self.accelerator.device)
-        model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+        model_ckpt = Path(self.cfg.resume_folder if self.cfg.resume_folder is not None else self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
         if model_ckpt.exists():
             self.load_ckpt(model_ckpt)
             log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
@@ -642,15 +645,6 @@ class Trainer:
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
             
-            # Save three-way reconstruction visualizations during validation
-            if plot and all(key in loss_components for key in ["visual_pred", "visual_tgt", "visual_reconstructed"]):
-                self.save_reconstruction_comparison_threeway(
-                    visual_tgt=loss_components["visual_tgt"],                    # Ground truth target images
-                    visual_pred=loss_components["visual_pred"],                  # Reconstruction from predictions
-                    visual_reconstructed=loss_components["visual_reconstructed"], # Reconstruction from original encoded features
-                    epoch=self.epoch,
-                    batch_idx=i
-                )
 
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
@@ -731,6 +725,17 @@ class Trainer:
                 wandb_log_dict["epoch"] = self.epoch
                 wandb_log_dict["step"] = i
                 self.wandb_run.log(wandb_log_dict)
+                
+        # Save three-way reconstruction visualizations during validation
+        if visual_out is not None and visual_reconstructed is not None:
+            self.save_threeway_comparison(
+                    visual_tgt=obs["visual"],
+                    visual_pred=visual_out,
+                    visual_reconstructed=visual_reconstructed,
+                    epoch=self.epoch,
+                    batch_idx=i,
+                    phase="train"
+                )
 
     def openloop_rollout(
         self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
@@ -781,10 +786,13 @@ class Trainer:
 
             obs_g = {}
             for k in obs.keys():
-                obs_g[k] = obs[k][-1].unsqueeze(0).unsqueeze(0).to(self.device)
-                
-            z_g = self.model.encode_to_projected(obs_g)
+                obs_g[k] = obs[k].unsqueeze(0).to(self.device)
             actions = act.unsqueeze(0)
+            _z = self.model.encode_to_projected(obs_g, torch.nn.functional.pad(actions, (0, 0, 1, 0), mode='constant', value=0))
+            
+            z_g = {}
+            for k in _z.keys():
+                z_g[k] = _z[k][:, -1:, ...]
 
             for past in num_past:
                 n_past, postfix = past
@@ -796,11 +804,9 @@ class Trainer:
                     )  # unsqueeze for batch, (b, t, c, h, w)
 
                 z_obses, z = self.model.rollout(obs_0, actions)
-                # z contains full 64D projected features, extract last timestep
+
                 z_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_last, z_g)
-            
-
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
                     if log_key in logs:
@@ -854,88 +860,49 @@ class Trainer:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
 
-    def save_reconstruction_comparison_threeway(self, visual_tgt, visual_pred, visual_reconstructed, epoch, batch_idx):
-        """
-        Save three-way comparison: ground truth, reconstruction from prediction, reconstruction from original encoded features
-        
-        Args:
-            visual_tgt: (B, T, 3, H, W) - Ground truth target images
-            visual_pred: (B, T, 3, H, W) - Decoder reconstructed images from predictions
-            visual_reconstructed: (B, T, 3, H, W) - Decoder reconstructed images from original encoded features
-            epoch: Current training epoch
-            batch_idx: Current batch index
-        """
+    def save_threeway_comparison(self, visual_tgt, visual_pred, visual_reconstructed, epoch, batch_idx, phase="train"):
+        """Save three-way comparison: ground_truth vs recon_from_pred vs recon_from_encoded"""
         if not self.accelerator.is_main_process:
             return
-            
-        import os
         from torchvision.utils import save_image
-        from einops import rearrange
-        
-        # Take first 4 samples and first 2 time steps for visualization
-        num_samples = min(4, visual_tgt.shape[0])
-        num_frames = min(2, visual_tgt.shape[1])
-        
-        visual_tgt = visual_tgt[:num_samples, :num_frames]              # (4, 2, 3, H, W)
-        visual_pred = visual_pred[:num_samples, :num_frames]            # (4, 2, 3, H, W)
-        visual_reconstructed = visual_reconstructed[:num_samples, :num_frames]  # (4, 2, 3, H, W)
-        
-        # Create comparison grid: [ground_truth, recon_from_pred, recon_from_encoded, ...]
+        num_samples = min(6, visual_tgt.shape[0])
+        num_frames = visual_pred.shape[1]
+        visual_tgt = visual_tgt[:num_samples]
+        visual_pred = visual_pred[:num_samples]
+        visual_reconstructed = visual_reconstructed[:num_samples]
+        # Create comparison grid
         comparison = []
         for i in range(num_samples):
             for t in range(num_frames):
-                comparison.append(visual_tgt[i, t])           # Ground truth
-                comparison.append(visual_pred[i, t])          # Reconstruction from prediction
-                comparison.append(visual_reconstructed[i, t]) # Reconstruction from original encoded features
-        
-        # Stack into single tensor: (num_samples*num_frames*3, 3, H, W)
+                comparison.append(visual_tgt[i, t+1])           # Ground truth
+                comparison.append(visual_pred[i, t])          # Prediction
+                comparison.append(visual_reconstructed[i, t+1]) # Reconstruction
+
         comparison_tensor = torch.stack(comparison, dim=0)
-        
+
+        # Normalize to [0, 1]
         if comparison_tensor.min() < 0:
-            comparison_tensor = (comparison_tensor + 1) / 2  # [-1, 1] -> [0, 1]
-        # If data is in [0, 255] range, convert to [0, 1]
+            comparison_tensor = (comparison_tensor + 1) / 2
         elif comparison_tensor.max() > 1:
-            comparison_tensor = comparison_tensor / 255.0  # [0, 255] -> [0, 1]
-        
+            comparison_tensor = comparison_tensor / 255.0
+
         comparison_tensor = torch.clamp(comparison_tensor, 0, 1)
-        
-        # Create output directory
+
+        # Save
         save_dir = os.path.join(self.cfg.saved_folder, "reconstructions")
         os.makedirs(save_dir, exist_ok=True)
-        
-        # Save comparison grid
-        filename = f"epoch_{epoch:03d}_batch_{batch_idx:03d}_threeway_comparison.png"
+
+        filename = f"epoch_{epoch:03d}_batch_{batch_idx:03d}_{phase}_threeway.png"
         filepath = os.path.join(save_dir, filename)
-        
+
         save_image(
             comparison_tensor,
             filepath,
-            nrow=3,  # 3 images per row (ground_truth, recon_from_pred, recon_from_encoded)
-            normalize=False,  # Already normalized
+            nrow=3,  # 3 images per row
+            normalize=False,
             padding=2,
-            pad_value=1.0  # White padding
+            pad_value=1.0
         )
-        
-        print(f"✅ Saved three-way reconstruction comparison: {filepath}")
-        
-        # Optionally log to wandb
-        if hasattr(self, 'wandb_run') and self.wandb_run is not None:
-            import wandb
-            # Create wandb images with labels
-            wandb_images = []
-            for i in range(min(2, num_samples)):  # Show first 2 samples
-                for t in range(num_frames):
-                    tgt_img = visual_tgt[i, t].cpu()
-                    pred_img = visual_pred[i, t].cpu()
-                    recon_img = visual_reconstructed[i, t].cpu()
-                    
-                    wandb_images.append(wandb.Image(tgt_img, caption=f"GT_S{i}_T{t}"))
-                    wandb_images.append(wandb.Image(pred_img, caption=f"ReconPred_S{i}_T{t}"))
-                    wandb_images.append(wandb.Image(recon_img, caption=f"ReconOrig_S{i}_T{t}"))
-            
-            self.wandb_run.log({
-                f"reconstructions_threeway/epoch_{epoch}": wandb_images
-            })
 
 
     def plot_samples(

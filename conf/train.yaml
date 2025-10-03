@@ -1,16 +1,18 @@
 defaults:
   - _self_
-  - env: pusht
+  - env: point_maze
   - encoder: dino 
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
-  - projector: linear
+  - projector: linear_temporal
   - override hydra/launcher: basic
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
-ckpt_base_path: /home/ubuntu/minghao/wm/pusht_outputs
+ckpt_base_path: /home/ubuntu/minghao/wm/outputs_point_maze
+resume_folder: /home/ubuntu/minghao/wm/outputs_point_maze/2025-09-18/04-59-43
+val_only: false
 
 hydra:
   run:

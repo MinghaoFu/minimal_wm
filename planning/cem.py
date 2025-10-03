@@ -74,12 +74,12 @@ class CEMPlanner(BasePlanner):
         trans_obs_g = move_to_device(
             self.preprocessor.transform_obs(obs_g), self.device
         )
-        z_obs_g = self.wm.encode_obs(trans_obs_g)
+        z_obs_g = self.wm.encode_obs_projected(trans_obs_g)
 
         mu, sigma = self.init_mu_sigma(obs_0, actions)
         mu, sigma = mu.to(self.device), sigma.to(self.device)
         n_evals = mu.shape[0]
-
+        self.opt_steps = 20
         for i in range(self.opt_steps):
             # optimize individual instances
             losses = []
@@ -131,4 +131,4 @@ class CEMPlanner(BasePlanner):
                 if np.all(successes):
                     break  # terminate planning if all success
 
-        return mu, np.full(n_evals, np.inf)  # all actions are valid
+        return mu, np.full(n_evals, np.inf)   # all actions are valid

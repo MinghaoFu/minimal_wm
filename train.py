@@ -5,11 +5,10 @@ import hydra
 import torch
 import wandb
 import logging
-
 import torch.nn as nn
 
 # WandB login with API key
-wandb.login(key="792a3b819c6b832d0087bd4905542a95c7236076")
+wandb.login(key="02f68fdb3367f7ff8ef0fd961bd1758e6e57dd24")
 import warnings
 import threading
 import itertools
@@ -150,8 +149,8 @@ class Trainer:
         self.proprio_encoder = None
         self.predictor = None
         self.decoder = None
-        projection_input_dim = self.cfg.encoder_emb_dim + self.cfg.proprio_emb_dim * self.cfg.num_proprio_repeat  # 384 + 32 = 416
-        self.post_concat_projection = nn.Linear(projection_input_dim, self.cfg.projected_dim)
+        # projection_input_dim = self.cfg.encoder_emb_dim + (self.cfg.proprio_emb_dim + self.cfg.action_emb_dim) * self.cfg.num_proprio_repeat 
+        # self.post_concat_projection = nn.Linear(projection_input_dim, self.cfg.projected_dim)
         
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
@@ -176,7 +175,8 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
-
+        self._keys_to_save += ["post_concat_projection"]
+        
         self.init_models()
         self.init_optimizers()
 
@@ -204,7 +204,8 @@ class Trainer:
         return ckpt_path, model_name, model_epoch
 
     def load_ckpt(self, filename="model_latest.pth"):
-        ckpt = torch.load(filename)
+        
+        ckpt = torch.load(filename, weights_only=False)
         for k, v in ckpt.items():
             self.__dict__[k] = v
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
@@ -212,10 +213,6 @@ class Trainer:
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
 
     def init_models(self):
-        model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
-        if model_ckpt.exists():
-            self.load_ckpt(model_ckpt)
-            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
 
         # initialize encoder
         if self.encoder is None:
@@ -246,10 +243,12 @@ class Trainer:
         self.action_encoder = self.accelerator.prepare(self.action_encoder)
         
         self.projection_input_dim = self.cfg.encoder_emb_dim + self.cfg.proprio_emb_dim * self.cfg.num_proprio_repeat 
+
         self.post_concat_projection = hydra.utils.instantiate(
             self.cfg.projector,
             in_features=self.projection_input_dim,
             out_features=self.cfg.projected_dim,
+            act_embed_dim=self.cfg.action_emb_dim,
         )
         self.post_concat_projection = self.accelerator.prepare(self.post_concat_projection)
 
@@ -324,6 +323,11 @@ class Trainer:
             alignment_dim=None
         )
         self.model = self.model.to(self.accelerator.device)
+        # load ckpt if resume_folder is provided
+        model_ckpt = Path(self.cfg.resume_folder if self.cfg.resume_folder is not None else self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+        if model_ckpt.exists():
+            self.load_ckpt(model_ckpt)
+            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -388,8 +392,11 @@ class Trainer:
             self.monitor_thread.start()
 
         init_epoch = self.epoch + 1  # epoch starts from 1
-        log.info("Running initial evaluation before training...")
-        self.val()
+        # log.info("Running initial evaluation before training...")
+        # self.val()
+        if self.cfg.val_only:
+            return
+        ckpt_path, model_name, model_epoch = self.save_ckpt()
         for epoch in range(init_epoch, init_epoch + self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
@@ -554,6 +561,12 @@ class Trainer:
                     num_samples=self.num_reconstruct_samples,
                     phase="train",
                 )
+                
+                # # Save every 1% of training progress
+                # total_steps = len(self.dataloaders["train"])
+                # save_interval = max(1, total_steps // 100)  # Save every 1%, at least every step if <100 steps
+                # if i % save_interval == 1:
+                #     self.save_ckpt()
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
@@ -597,7 +610,7 @@ class Trainer:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
-                    z_gt = self.model.encode_to_projected(obs)
+                    z_gt = self.model.encode_to_projected(obs, act)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
 
                     state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
@@ -661,7 +674,51 @@ class Trainer:
                 )
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+            
+    def save_threeway_comparison(self, visual_tgt, visual_pred, visual_reconstructed, epoch, batch_idx, phase="train"):
+        """Save three-way comparison: ground_truth vs recon_from_pred vs recon_from_encoded"""
+        if not self.accelerator.is_main_process:
+            return
+        from torchvision.utils import save_image
+        num_samples = min(6, visual_tgt.shape[0])
+        num_frames = visual_pred.shape[1]
+        visual_tgt = visual_tgt[:num_samples]
+        visual_pred = visual_pred[:num_samples]
+        visual_reconstructed = visual_reconstructed[:num_samples]
+        # Create comparison grid
+        comparison = []
+        for i in range(num_samples):
+            for t in range(num_frames):
+                comparison.append(visual_tgt[i, t+1])           # Ground truth
+                comparison.append(visual_pred[i, t])          # Prediction
+                comparison.append(visual_reconstructed[i, t+1]) # Reconstruction
 
+        comparison_tensor = torch.stack(comparison, dim=0)
+
+        # Normalize to [0, 1]
+        if comparison_tensor.min() < 0:
+            comparison_tensor = (comparison_tensor + 1) / 2
+        elif comparison_tensor.max() > 1:
+            comparison_tensor = comparison_tensor / 255.0
+
+        comparison_tensor = torch.clamp(comparison_tensor, 0, 1)
+
+        # Save
+        save_dir = os.path.join(self.cfg.saved_folder, "reconstructions")
+        os.makedirs(save_dir, exist_ok=True)
+
+        filename = f"epoch_{epoch:03d}_batch_{batch_idx:03d}_{phase}_threeway.png"
+        filepath = os.path.join(save_dir, filename)
+
+        save_image(
+            comparison_tensor,
+            filepath,
+            nrow=3,  # 3 images per row
+            normalize=False,
+            padding=2,
+            pad_value=1.0
+        )
+        
     def openloop_rollout(
         self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
     ):
@@ -711,10 +768,13 @@ class Trainer:
 
             obs_g = {}
             for k in obs.keys():
-                obs_g[k] = obs[k][-1].unsqueeze(0).unsqueeze(0).to(self.device)
-            z_g = self.model.encode_to_projected(obs_g)
-            
+                obs_g[k] = obs[k].unsqueeze(0).to(self.device)
             actions = act.unsqueeze(0)
+            _z = self.model.encode_to_projected(obs_g, torch.nn.functional.pad(actions, (0, 0, 1, 0), mode='constant', value=0))
+            
+            z_g = {}
+            for k in _z.keys():
+                z_g[k] = _z[k][:, -1:, ...]
 
             for past in num_past:
                 n_past, postfix = past
@@ -843,56 +903,6 @@ class Trainer:
             nrow=num_columns,
             normalize=True,
             value_range=(-1, 1),
-        )
-        
-    def save_threeway_comparison(self, visual_tgt, visual_pred, visual_reconstructed, epoch, batch_idx, phase="train"):
-        """Save three-way comparison: ground_truth vs recon_from_pred vs recon_from_encoded"""
-        if not self.accelerator.is_main_process:
-            return
-
-        import os
-        from torchvision.utils import save_image
-
-        # Take first 4 samples and first 2 time steps for visualization
-        num_samples = min(4, visual_tgt.shape[0])
-        num_frames = min(2, visual_tgt.shape[1])
-
-        visual_tgt = visual_tgt[:num_samples, :num_frames]
-        visual_pred = visual_pred[:num_samples, :num_frames]
-        visual_reconstructed = visual_reconstructed[:num_samples, :num_frames]
-
-        # Create comparison grid
-        comparison = []
-        for i in range(num_samples):
-            for t in range(num_frames):
-                comparison.append(visual_tgt[i, t])           # Ground truth
-                comparison.append(visual_pred[i, t])          # Prediction
-                comparison.append(visual_reconstructed[i, t]) # Reconstruction
-
-        comparison_tensor = torch.stack(comparison, dim=0)
-
-        # Normalize to [0, 1]
-        if comparison_tensor.min() < 0:
-            comparison_tensor = (comparison_tensor + 1) / 2
-        elif comparison_tensor.max() > 1:
-            comparison_tensor = comparison_tensor / 255.0
-
-        comparison_tensor = torch.clamp(comparison_tensor, 0, 1)
-
-        # Save
-        save_dir = os.path.join(self.cfg.saved_folder, "reconstructions")
-        os.makedirs(save_dir, exist_ok=True)
-
-        filename = f"epoch_{epoch:03d}_batch_{batch_idx:03d}_{phase}_threeway.png"
-        filepath = os.path.join(save_dir, filename)
-
-        save_image(
-            comparison_tensor,
-            filepath,
-            nrow=3,  # 3 images per row
-            normalize=False,
-            padding=2,
-            pad_value=1.0
         )
 
 
