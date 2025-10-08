@@ -1,14 +1,15 @@
 defaults:
   - _self_
-  - env: robomimic_square_full
+  - env: robomimic_tool_hang_full
   - encoder: dino
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
-  - projector: linear_temporal
+  - projector: linear_vae # linear vae
   - override hydra/launcher: basic
 
+ckpt_base_path: ./outputs_${env.name}
 resume_folder: none
 val_only: false
 # DINO encoder configuration
@@ -19,7 +20,7 @@ encoder:
   feature_key: "x_norm_patchtokens"
 
 # Base path for local execution
-ckpt_base_path: ./outputs_robomimic_square_full
+
 
 # Clean hydra config without any submitit
 hydra:
@@ -65,7 +66,6 @@ num_proprio_repeat: 1
 # Temporal projector with patch compression configuration
 # Input: x_t (416 dim, 196 patches) + z_{t-1} history
 # Output: z_t (64 dim, 49 patches compressed)
-projection_input_dim: 416  # visual + proprio input dimension
 projected_dim: 64  # Target compressed dimension
 compressed_patches: 49  # Target compressed patch count (7x7)
 original_patches: 196   # Original patch count (14x14)

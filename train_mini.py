@@ -107,11 +107,13 @@ class Trainer:
             wandb_dict = OmegaConf.to_container(cfg, resolve=True)
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
-                self.wandb_run = wandb.init( 
+                self.wandb_run = wandb.init(
                     project="minimal_wm",
+                    entity="minghao_workaholic",
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    mode="offline",
                 )
             else:
                 self.wandb_run = wandb.init(
@@ -120,6 +122,7 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    mode="offline",
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
@@ -186,8 +189,13 @@ class Trainer:
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
         self._keys_to_save += ["post_concat_projection"]
+        # alignment_projection will be added after initialization if it exists
 
         self.init_models()
+
+        # Add alignment_projection to save keys after it's created in init_models
+        if hasattr(self, 'alignment_projection') and self.alignment_projection is not None:
+            self._keys_to_save += ["alignment_projection"]
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
@@ -311,7 +319,16 @@ class Trainer:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
                     
-        # Create the model BEFORE wrapping with accelerator to avoid DDP attribute access issues
+        self.alignment_projection = None
+        # Initialize alignment projection now that we know state_dim
+        if hasattr(self.datasets['train'].dataset, 'states'):
+            state_dim = self.datasets['train'].dataset.states.shape[-1]
+            # for alginment infonce
+            alignment_dim = min(self.cfg.proprio_emb_dim * self.cfg.num_proprio_repeat, self.cfg.projected_dim)
+            self.alignment_projection = torch.nn.Linear(alignment_dim, state_dim).to(self.accelerator.device)
+            self.alignment_projection = self.accelerator.prepare(self.alignment_projection)
+            log.info(f"Created alignment projection: {alignment_dim}D -> {state_dim}D")
+
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,
@@ -320,6 +337,7 @@ class Trainer:
             predictor=self.predictor,
             decoder=self.decoder,
             post_concat_projection=self.post_concat_projection,
+            alignment_projection=self.alignment_projection,
             proprio_dim=proprio_emb_dim,
             action_dim=action_emb_dim,
             concat_dim=self.cfg.concat_dim,
@@ -331,13 +349,11 @@ class Trainer:
             self.encoder, self.predictor, self.decoder
         )
         
-        # Set alignment hyperparameters if provided
         if hasattr(self.cfg, 'alignment'):
             if hasattr(self.cfg.alignment, 'state_consistency_loss_weight'):
                 self.model.state_consistency_loss_weight = self.cfg.alignment.state_consistency_loss_weight
             if hasattr(self.cfg.alignment, 'alignment_regularization'):
                 self.model.alignment_regularization = self.cfg.alignment.alignment_regularization
-            # Set latent dynamics loss weight (for full 64D latent space dynamics)
             if hasattr(self.cfg.alignment, 'latent_dynamics_loss_weight'):
                 self.model.latent_dynamics_loss_weight = self.cfg.alignment.latent_dynamics_loss_weight
             elif hasattr(self.cfg.alignment, 'dynamics_7d_loss_weight'):  # Backward compatibility

@@ -85,23 +85,15 @@ class LinearTemporalProjector(nn.Module):
         
         if self.use_history:
             assert act is not None
-            # 历史缓存 (B, P, H, out_features) 和 (B, P, H, act_embed_dim)
             z_hist = torch.zeros(B, P, H, self.out_features, device=device, dtype=dtype)
             a_hist = torch.zeros(B, P, H, self.act_embed_dim, device=device, dtype=dtype)
 
             z_list = []
             for t in range(T):
-                # 展平历史 (B, P, H*(out_features + act_embed_dim))
                 hist_flat = torch.cat([z_hist, a_hist], dim=-1).reshape(B, P, -1)
-
-                # 当前输入 (B, P, concat_features)
                 x = torch.cat([hist_flat, o[:, t]], dim=-1)
-
-                # 直接调用 Linear: 会在最后一维上做映射 (patch 维度保持独立)
                 z_t = self.concat_projector(x)  # (B, P, out_features)
                 z_list.append(z_t)
-
-                # 更新历史
                 if H > 0:
                     if H > 1:
                         z_hist[:, :, :-1] = z_hist[:, :, 1:].clone()
@@ -109,8 +101,8 @@ class LinearTemporalProjector(nn.Module):
                     z_hist[:, :, -1] = z_t
                     a_hist[:, :, -1] = act[:, t]
 
-            z = torch.stack(z_list, dim=1)  # (B, T, P, out_features)
-        else:
+            z = torch.stack(z_list, dim=1)  
+        else: # now we use it for no history
             z = self.concat_projector(o)
         return z
 

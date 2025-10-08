@@ -8,7 +8,6 @@ echo "🔧 Setting up environment..."
 cd /data2/minghao/wm
 # export PATH="/usr/local/anaconda3/bin:$PATH"
 # eval "$(/usr/local/anaconda3/etc/profile.d/conda.sh)"
-conda init bash
 conda activate wm310
 
 # Verify environment
@@ -22,20 +21,28 @@ export HUGGINGFACE_HUB_CACHE=$HOME/.cache/huggingface
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Training configuration
-CONFIG_NAME="train_robomimic_compress"
+CONFIG_NAME="train_mini"
 DEBUG_MODE=${DEBUG:-false}
 EPOCHS=${EPOCHS:-100}  
 NUM_GPUS=${NUM_GPUS:-1}  
 GPU_IDS=${GPU_IDS:-"auto"}  
 RESUME=${RESUME:-""}  
 PROJECTED_DIM=${PROJECTED_DIM:-64}
-ENV=${ENV:-"pusht"}
+ENV=${ENV:-""}
+DATASET_NAME=${DATASET_NAME:-""}
+ENV_OVERRIDE=""
 
 echo "🚀 Starting DINO World Model training..."
 echo "Config: $CONFIG_NAME"
 echo "Debug mode: $DEBUG_MODE"
 echo "Epochs: $EPOCHS"
 echo "Number of GPUs: $NUM_GPUS"
+if [ -n "$DATASET_NAME" ]; then
+    echo "Dataset override: $DATASET_NAME"
+    ENV_OVERRIDE="robomimic_${DATASET_NAME}_full"
+else
+    echo "Dataset override: (using config default)"
+fi
 if [ -n "$RESUME" ]; then
     echo "Resume from: $RESUME"
 fi
@@ -62,19 +69,23 @@ fi
 # Debug run first (optional)
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "🔍 Running debug training (1 epoch)..."
+    DEBUG_ARGS="--config-name=$CONFIG_NAME training.epochs=1 debug=true"
+    if [ -n "$DATASET_NAME" ]; then
+        DEBUG_ARGS="$DEBUG_ARGS dataset_name=$DATASET_NAME"
+    fi
+    if [ -n "$ENV_OVERRIDE" ]; then
+        DEBUG_ARGS="$DEBUG_ARGS env=$ENV_OVERRIDE"
+    elif [ -n "$ENV" ]; then
+        DEBUG_ARGS="$DEBUG_ARGS env=$ENV"
+    fi
     if [ "$NUM_GPUS" -eq 1 ]; then
-        python train_robomimic_compress.py \
-            --config-name=$CONFIG_NAME \
-            training.epochs=1 \
-            debug=true
+        python train_mini.py $DEBUG_ARGS
     else
         accelerate launch --num_processes=$NUM_GPUS \
-            train_robomimic_compress.py \
-            --config-name=$CONFIG_NAME \
-            training.epochs=1 \
-            debug=true
+            train_mini.py \
+            $DEBUG_ARGS
     fi
-    
+
     if [ $? -eq 0 ]; then
         echo "✅ Debug run successful, proceeding with full training..."
     else
@@ -88,10 +99,17 @@ echo "🎯 Starting full training..."
 
 # Set up training command with optional resume path
 TRAIN_ARGS="--config-name=$CONFIG_NAME training.epochs=$EPOCHS projected_dim=$PROJECTED_DIM"
+if [ -n "$DATASET_NAME" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS dataset_name=$DATASET_NAME"
+fi
+if [ -n "$ENV_OVERRIDE" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS env=$ENV_OVERRIDE"
+elif [ -n "$ENV" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS env=$ENV"
+fi
 if [ -n "$RESUME" ]; then
     echo "📂 Will resume from checkpoint: $RESUME"
     TRAIN_ARGS="$TRAIN_ARGS +saved_folder=$RESUME"
-    TRAIN_ARGS="$TRAIN_ARGS +env=$ENV"
     TRAIN_ARGS="$TRAIN_ARGS +projected_dim=$PROJECTED_DIM"
 fi
 
@@ -120,7 +138,7 @@ copy_models_and_config() {
 
 if [ "$NUM_GPUS" -eq 1 ]; then
     echo "Running single GPU training..."
-    python train_robomimic_compress.py $TRAIN_ARGS 
+    python train_mini.py $TRAIN_ARGS 
     TRAIN_PID=$!
 else
     echo "Running multi-GPU training with $NUM_GPUS GPUs..."
@@ -128,7 +146,7 @@ else
     accelerate launch \
         --num_processes=$NUM_GPUS \
         --mixed_precision=no \
-        train_robomimic_compress.py \
+        train_mini.py \
         $TRAIN_ARGS \
         training.batch_size=64  # Reduce batch size per GPU for multi-GPU
     TRAIN_PID=$!

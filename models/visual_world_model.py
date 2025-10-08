@@ -16,6 +16,7 @@ class VWorldModel(nn.Module):
         decoder,
         post_concat_projection,
         predictor,
+        alignment_projection=None,  # nn.Linear for state alignment
         proprio_dim=0,
         action_dim=0,
         concat_dim=0,
@@ -95,10 +96,10 @@ class VWorldModel(nn.Module):
         self.decoder_criterion = nn.MSELoss()
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
-        
+
         # Linear alignment loss for state supervision
+        self.alignment_projection = alignment_projection  # nn.Linear: R^{alignment_dim} -> R^{state_dim}
         self.state_consistency_loss_weight = 1.0
-        self.alignment_W = None  # Linear transformation matrix W: R^{64} -> R^{state_dim}
         self.alignment_regularization = 1e-4  # L2 regularization on W
         
         # Conditional Flow KL divergence loss
@@ -278,64 +279,18 @@ class VWorldModel(nn.Module):
             z_act = z_act[:, :, 0, : self.action_dim // self.num_action_repeat]
         z_obs = {"projected": z_projected}
         return z_obs, z_act
-    
-    def compute_detailed_state_alignment(self, obs, act, state):
-        """
-        Compute detailed per-dimension alignment metrics for analysis
-        Returns dict with per-dimension metrics
-        """
-        with torch.no_grad():
-            self.eval()
-            z, _ = self.encode(obs, act)
-            z_src = z[:, : self.num_hist, :, :]
-            
-            if self.predictor is not None:
-                z_pred = self.predict(z_src)
-                
-                if state is not None and self.state_projection is not None:
-                    # Extract visual embeddings for state consistency
-                    if self.concat_dim == 0:
-                        z_visual_for_state = z_pred[:, :, :-2, :]
-                    elif self.concat_dim == 1:
-                        z_visual_for_state = z_pred[:, :, :, :-(self.proprio_dim + self.action_dim)]
-                    
-                    # Take half of the features for state consistency
-                    half_dim = z_visual_for_state.shape[-1] // 2
-                    z_state_features = z_visual_for_state[:, :, :, :half_dim]
-                    z_state_avg = z_state_features.mean(dim=2)
-                    predicted_state = self.state_projection(z_state_avg)
-                    
-                    state_tgt = state[:, self.num_pred:, :]
-                    
-                    # Per-dimension metrics
-                    state_dim = state_tgt.shape[-1]
-                    per_dim_metrics = {}
-                    
-                    for dim in range(state_dim):
-                        pred_dim = predicted_state[:, :, dim].flatten()
-                        tgt_dim = state_tgt[:, :, dim].flatten()
-                        
-                        # MAE per dimension
-                        mae_dim = torch.mean(torch.abs(pred_dim - tgt_dim))
-                        per_dim_metrics[f"state_dim_{dim}_mae"] = mae_dim.item()
-                        
-                        # Correlation per dimension
-                        if len(pred_dim) > 1:
-                            pred_centered = pred_dim - torch.mean(pred_dim)
-                            tgt_centered = tgt_dim - torch.mean(tgt_dim)
-                            correlation = torch.sum(pred_centered * tgt_centered) / (
-                                torch.sqrt(torch.sum(pred_centered**2)) * torch.sqrt(torch.sum(tgt_centered**2)) + 1e-8
-                            )
-                            per_dim_metrics[f"state_dim_{dim}_correlation"] = correlation.item()
-                        
-                        # RMSE per dimension
-                        rmse_dim = torch.sqrt(torch.mean((pred_dim - tgt_dim)**2))
-                        per_dim_metrics[f"state_dim_{dim}_rmse"] = rmse_dim.item()
-                    
-                    return per_dim_metrics
-            
-            return {}
 
+    def infonce_loss(self, z_aligned, z_target, temperature=0.1):
+        z_aligned_flat = z_aligned.reshape(-1, z_aligned.shape[-1])  # (b*num_hist, 7)
+        z_target_flat = z_target.reshape(-1, z_target.shape[-1])    # (b*num_hist, 7)
+        z_aligned_norm = torch.nn.functional.normalize(z_aligned_flat, dim=1)
+        z_target_norm = torch.nn.functional.normalize(z_target_flat, dim=1)
+        logits = torch.matmul(z_aligned_norm, z_target_norm.T) / temperature  # (N, N)
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        
+        loss_ce = torch.nn.functional.cross_entropy(logits, labels)
+        return loss_ce
+                
     def forward(self, obs, act, state=None):
         """
         input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
@@ -384,57 +339,30 @@ class VWorldModel(nn.Module):
             
             # InfoNCE alignment approach: first alignment_dim of projected features → actual state dimension
             if state is not None:
-                # Initialize alignment matrix W if not done yet (maps alignment_dim of projected features to actual state_dim)
-                if self.alignment_W is None:
-                    state_dim = state.shape[-1]  # Should be alignment_dim
-                    # W: R^alignment_dim -> R^state_dim (linear mapping from alignment_dim of projected features to state_dim)
-                    self.alignment_W = nn.Parameter(torch.randn(self.alignment_dim, state_dim, device=state.device) * 0.01)
-                
-                # Extract projected visual+proprio features (exclude actions from 80D)
-                # z_pred is now 80D: 64D projected + 16D action
                 if self.concat_dim == 0:
                     z_visual_for_state = z_pred[:, :, :-2, :]  # (b, num_hist, num_patches, 80D)
                 elif self.concat_dim == 1:
-                    # Extract only the projected features (first 64D), exclude actions (last 16D)
                     z_visual_for_state = z_pred[:, :, :, :self.projected_dim]  # (b, num_hist, num_patches, 64D)
                 
-                # Average over patches to get single representation per timestep
                 z_avg = z_visual_for_state.mean(dim=2)  # (b, num_hist, z_dim)
-                
-                # Extract first alignment_dim dimensions for state alignment
                 z_align_dims = z_avg[:, :, :self.alignment_dim]  # (b, num_hist, alignment_dim) - first alignment_dim dims
-                
-                # Get target states for the predicted frames
-                state_dim = state.shape[-1]  # Get actual state dimension from data
                 z_target = state[:, self.num_pred:, :]  # (b, num_hist, state_dim)
-                
-                # Linear mapping: W^T @ z_align_dims -> state_dim aligned features
-                z_aligned = torch.matmul(z_align_dims, self.alignment_W)  # (b, num_hist, state_dim)
-                
-                # InfoNCE loss for alignment
-                def infonce_loss(z_aligned, z_target, temperature=0.1):
-                    # Flatten batch and time dimensions
-                    z_aligned_flat = z_aligned.reshape(-1, z_aligned.shape[-1])  # (b*num_hist, 7)
-                    z_target_flat = z_target.reshape(-1, z_target.shape[-1])    # (b*num_hist, 7)
-                    
-                    # Normalize features
-                    z_aligned_norm = torch.nn.functional.normalize(z_aligned_flat, dim=1)
-                    z_target_norm = torch.nn.functional.normalize(z_target_flat, dim=1)
-                    
-                    # Compute similarity matrix
-                    logits = torch.matmul(z_aligned_norm, z_target_norm.T) / temperature  # (N, N)
-                    
-                    # Positive pairs are on the diagonal
-                    labels = torch.arange(logits.shape[0], device=logits.device)
-                    
-                    # Cross-entropy loss
-                    loss_ce = torch.nn.functional.cross_entropy(logits, labels)
-                    return loss_ce
-                
-                alignment_loss = infonce_loss(z_aligned, z_target)
-                
-                # L2 regularization on W
-                w_regularization = self.alignment_regularization * torch.sum(self.alignment_W**2)
+
+                # Use alignment projection if available
+                if self.alignment_projection is not None:
+                    # Reshape for nn.Linear: (b*num_hist, alignment_dim) -> (b*num_hist, state_dim)
+                    b, num_hist, align_dim = z_align_dims.shape
+                    z_aligned = self.alignment_projection(z_align_dims.reshape(-1, align_dim))
+                    z_aligned = z_aligned.reshape(b, num_hist, -1)  # (b, num_hist, state_dim)
+
+                    alignment_loss = self.infonce_loss(z_aligned, z_target)
+
+                    # L2 regularization on projection weights
+                    w_regularization = self.alignment_regularization * torch.sum(self.alignment_projection.weight**2)
+                else:
+                    # Skip alignment if projection not available
+                    alignment_loss = torch.tensor(0.0, device=z_align_dims.device)
+                    w_regularization = torch.tensor(0.0, device=z_align_dims.device)
                 
                 # Total state consistency loss
                 state_consistency_loss = alignment_loss + w_regularization
@@ -442,20 +370,16 @@ class VWorldModel(nn.Module):
                 loss_components["state_consistency_loss"] = state_consistency_loss
                 loss_components["alignment_loss"] = alignment_loss
                 loss_components["w_regularization"] = w_regularization
-                
-                # Temporal dynamics prediction in 64D projected space (exclude actions)
-                # Following original DINO WM: actions are conditioning, not prediction targets
-                if hasattr(self, 'latent_dynamics_loss_weight') and self.latent_dynamics_loss_weight > 0:
-                    # Get source z features (from input frames) - exclude actions (first 64D of 80D)
+
+                if hasattr(self, 'latent_dynamics_loss_weight') and self.latent_dynamics_loss_weight > 0: # not used
                     if self.concat_dim == 0:
-                        z_visual_src = z_src[:, :, :-2, :]  # (b, num_hist, num_patches, 80D)
-                        z_visual_src = z_visual_src[:, :, :, :self.projected_dim]  # First 64D
+                        z_visual_src = z_src[:, :, :-2, :] 
+                        z_visual_src = z_visual_src[:, :, :, :self.projected_dim] 
                     elif self.concat_dim == 1:
-                        # Extract only the projected features (first 64D), exclude actions (last 16D)
-                        z_visual_src = z_src[:, :, :, :self.projected_dim]  # (b, num_hist, num_patches, 64D)
+                        z_visual_src = z_src[:, :, :, :self.projected_dim]  
                     
-                    z_src_avg = z_visual_src.mean(dim=2)  # (b, num_hist, 64D) - projected features only
-                    z_pred_avg = z_avg  # (b, num_hist, 64D) - predicted projected features
+                    z_src_avg = z_visual_src.mean(dim=2) 
+                    z_pred_avg = z_avg  
                     
                     # Predict t from t-1 using 64D projected features (64D → 64D)
                     dynamics_loss = torch.mean((z_pred_avg - z_src_avg)**2)
@@ -464,7 +388,7 @@ class VWorldModel(nn.Module):
 
             
             # DINO feature reconstruction loss (384D -> 128D -> 384D)
-            if hasattr(self.encoder, 'recon_dino_loss') and self.encoder.recon_dino_loss:
+            if hasattr(self.encoder, 'recon_dino_loss') and self.encoder.recon_dino_loss: # not used
                 # Get DINO reconstruction loss from encoder
                 dino_recon_loss = getattr(self.encoder, 'last_recon_loss', None)
                 if dino_recon_loss is not None and hasattr(self, 'dino_recon_loss_weight'):
@@ -495,6 +419,10 @@ class VWorldModel(nn.Module):
                 decoder_loss_reconstructed
             )
             loss = loss + decoder_loss_reconstructed
+            if hasattr(self.post_concat_projection, 'kl_loss'):
+                kl = self.post_concat_projection.kl_loss  # scalar mean KL
+                loss = loss + 1 * kl
+                loss_components["projector_kl_loss"] = kl
         else:
             visual_reconstructed = None
             

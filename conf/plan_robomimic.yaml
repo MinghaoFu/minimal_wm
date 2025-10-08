@@ -17,7 +17,7 @@ goal_source: 'dset'
 goal_H: 15
 n_plot_samples: 0
 env_name: can-ph
-data_prefix: /home/ubuntu/minghao/data/robomimic
+data_prefix: /data2/minghao/data/robomimic
 
 debug_dset_init: False
 
