@@ -1,19 +1,26 @@
 defaults:
   - _self_
-  - env: robomimic_tool_hang_full
+  - env: wall
   - encoder: dino
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
-  - projector: linear_vae # linear vae
+  - projector: linear_temporal # linear vae
   - override hydra/launcher: basic
 
 ckpt_base_path: ./outputs_${env.name}
-resume_folder: none
+resume_folder: none #/data2/minghao/wm/outputs_wall/2025-10-03/04-35-04
 val_only: false
-# DINO encoder configuration
-# DINO encoder configuration
+
+latent_export:
+  enabled: false
+  output_path: null
+  splits: ["train"]
+  rgb_key: agentview_image
+  latent_grid_size: 14
+  mode: trajectory # slice
+
 encoder:
   _target_: models.dino.DinoV2Encoder
   name: "dinov2_vits14"
@@ -108,5 +115,6 @@ plan_settings:
 
 # WandB settings
 wandb:
-  project: wm_align
+  project: tasuw
   name: "linear_projector_history_196_64"
+  entity: minghao_workaholic

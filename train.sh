@@ -7,10 +7,7 @@ set -e  # Exit on any error
 
 # Environment setup
 echo "🔧 Setting up environment..."
-cd /data2/minghao/wm
-export PATH="/usr/local/anaconda3/bin:$PATH"
-eval "$(/usr/local/anaconda3/etc/profile.d/conda.sh)"
-conda activate wm310
+cd /data2/minghao/wm_align/wm
 
 # Verify environment
 echo "🔍 Verifying environment..."
@@ -150,7 +147,6 @@ TRAIN_EXIT_CODE=$?
 # Check training status
 if [ $TRAIN_EXIT_CODE -eq 0 ]; then
     echo "✅ Training completed successfully!"
-    echo "📊 Check WandB: https://wandb.ai/causality_/dino_wm_align_recon"
     echo "📁 Output directory: outputs/$(date +%Y-%m-%d)"
     if [ -n "$OUTPUT_DIR" ]; then
         echo "📂 Models and config saved to: $OUTPUT_DIR"

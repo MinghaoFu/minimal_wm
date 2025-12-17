@@ -225,7 +225,6 @@ class VWorldModel(nn.Module):
         z_projected = z[:, :, :, :self.projected_dim]
         z_action = z[:, :, :, self.projected_dim:]
         T = z.shape[1]
-        # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
         z = self.predictor(z)

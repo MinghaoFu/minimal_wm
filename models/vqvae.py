@@ -221,14 +221,19 @@ class VQVAE(nn.Module):
         else:
             quant_b, diff_b = input, torch.zeros(1).to(input.device)
 
-        quant_b = quant_b.permute(0, 3, 1, 2)
+        quant_b = quant_b.permute(0, 3, 1, 2).contiguous()
         diff_b = diff_b.unsqueeze(0)
         dec = self.decode(quant_b)
         return dec, diff_b # diff is 0 if no quantization
 
     def decode(self, quant_b):
-        upsample_b = self.upsample_b(quant_b) 
-        dec = self.dec(upsample_b) # quant: (128, 64, 64)
+        quant_b = quant_b.contiguous()
+        # Hopper GPUs occasionally hit cuDNN GET kernel selection failures for these shapes.
+        # Temporarily disabling cuDNN here keeps inference stable with minimal overhead.
+        with torch.backends.cudnn.flags(enabled=False):
+            upsample_b = self.upsample_b(quant_b)
+            upsample_b = upsample_b.contiguous()
+            dec = self.dec(upsample_b) # quant: (128, 64, 64)
         return dec
 
     def decode_code(self, code_b): # not used (only used in sample.py in original repo)

@@ -1,3 +1,4 @@
+import time
 import torch
 import numpy as np
 from einops import rearrange, repeat
@@ -79,10 +80,12 @@ class CEMPlanner(BasePlanner):
         mu, sigma = self.init_mu_sigma(obs_0, actions)
         mu, sigma = mu.to(self.device), sigma.to(self.device)
         n_evals = mu.shape[0]
-        self.opt_steps = 20
+        self.opt_steps = self.opt_steps if self.opt_steps is not None else 20
         for i in range(self.opt_steps):
+            iter_start = time.perf_counter()
             # optimize individual instances
             losses = []
+            total_candidates = 0
             for traj in range(n_evals):
                 cur_trans_obs_0 = {
                     key: repeat(
@@ -103,6 +106,7 @@ class CEMPlanner(BasePlanner):
                     * sigma[traj]
                     + mu[traj]
                 )
+                total_candidates += action.shape[0]
                 action[0] = mu[traj]  # optional: make the first one mu itself
                 with torch.no_grad():
                     i_z_obses, i_zs = self.wm.rollout(
@@ -117,14 +121,26 @@ class CEMPlanner(BasePlanner):
                 mu[traj] = topk_action.mean(dim=0)
                 sigma[traj] = topk_action.std(dim=0)
 
-            self.wandb_run.log(
-                {f"{self.logging_prefix}/loss": np.mean(losses), "step": i + 1}
+            iter_duration = time.perf_counter() - iter_start
+            candidates_per_sec = (
+                total_candidates / iter_duration if iter_duration > 0 else float("inf")
             )
+            speed_logs = {
+                f"{self.logging_prefix}/candidates_per_sec": candidates_per_sec,
+                f"{self.logging_prefix}/iter_duration": iter_duration,
+            }
+            base_log = {
+                f"{self.logging_prefix}/loss": np.mean(losses),
+                "step": i + 1,
+            }
+            base_log.update(speed_logs)
+            self.wandb_run.log(base_log)
             if self.evaluator is not None and i % self.eval_every == 0:
                 logs, successes, _, _ = self.evaluator.eval_actions(
                     mu, filename=f"{self.logging_prefix}_output_{i+1}"
                 )
                 logs = {f"{self.logging_prefix}/{k}": v for k, v in logs.items()}
+                logs.update(speed_logs)
                 logs.update({"step": i + 1})
                 self.wandb_run.log(logs)
                 self.dump_logs(logs)

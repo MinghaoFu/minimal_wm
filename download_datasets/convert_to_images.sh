@@ -8,7 +8,7 @@ set -e
 # Default values
 TASK=${1:-can}
 DATASET_TYPE=${2:-ph}
-RESOLUTION=${3:-384}
+RESOLUTION=${3:-64}
 ROBOMIMIC_DIR="/data2/minghao/robomimic"
 DATA_DIR="/data2/minghao/data/robomimic"
 

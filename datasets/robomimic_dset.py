@@ -223,7 +223,18 @@ def load_robomimic_slice_train_val(
             
             def get_all_actions(self):
                 return self.dataset.get_all_actions()
-            
+            @property
+            def states(self):
+                return self.dataset.states
+            @property
+            def proprios(self):
+                return self.dataset.proprios
+            @property
+            def actions(self):
+                return self.dataset.actions
+            @property
+            def shapes(self):
+                return self.dataset.shapes
             @property
             def action_dim(self):
                 return self.dataset.action_dim

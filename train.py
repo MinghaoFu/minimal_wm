@@ -4,6 +4,7 @@ import time
 import hydra
 import torch
 import wandb
+import weave
 import logging
 import torch.nn as nn
 
@@ -96,17 +97,21 @@ class Trainer:
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
                 self.wandb_run = wandb.init(
-                    project="dino_wm_debug",
+                    project="minimal_wm",
+                    entity="minghao_workaholic",
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    mode="offline",
                 )
             else:
                 self.wandb_run = wandb.init(
-                    project="dino_wm",
+                    project=cfg.wandb.project,
+                    entity=cfg.wandb.entity,
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    mode="offline",
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
@@ -178,6 +183,9 @@ class Trainer:
         self._keys_to_save += ["post_concat_projection"]
         
         self.init_models()
+        # Add alignment_projection to save keys after it's created in init_models
+        if hasattr(self, 'alignment_projection') and self.alignment_projection is not None:
+            self._keys_to_save += ["alignment_projection"]
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()

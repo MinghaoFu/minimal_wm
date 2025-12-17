@@ -5,7 +5,7 @@
 
 # Environment setup
 echo "🔧 Setting up environment..."
-cd /data2/minghao/wm
+cd /data2/minghao/wm_align/wm
 # export PATH="/usr/local/anaconda3/bin:$PATH"
 # eval "$(/usr/local/anaconda3/etc/profile.d/conda.sh)"
 conda activate wm310
@@ -21,7 +21,7 @@ export HUGGINGFACE_HUB_CACHE=$HOME/.cache/huggingface
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Training configuration
-CONFIG_NAME="train_mini"
+CONFIG_NAME="train_tasuw"
 DEBUG_MODE=${DEBUG:-false}
 EPOCHS=${EPOCHS:-100}  
 NUM_GPUS=${NUM_GPUS:-1}  
@@ -79,10 +79,10 @@ if [ "$DEBUG_MODE" = "true" ]; then
         DEBUG_ARGS="$DEBUG_ARGS env=$ENV"
     fi
     if [ "$NUM_GPUS" -eq 1 ]; then
-        python train_mini.py $DEBUG_ARGS
+        python train_tasuw.py $DEBUG_ARGS
     else
         accelerate launch --num_processes=$NUM_GPUS \
-            train_mini.py \
+            train_tasuw.py \
             $DEBUG_ARGS
     fi
 
@@ -138,7 +138,7 @@ copy_models_and_config() {
 
 if [ "$NUM_GPUS" -eq 1 ]; then
     echo "Running single GPU training..."
-    python train_mini.py $TRAIN_ARGS 
+    python train_tasuw.py $TRAIN_ARGS 
     TRAIN_PID=$!
 else
     echo "Running multi-GPU training with $NUM_GPUS GPUs..."
@@ -146,7 +146,7 @@ else
     accelerate launch \
         --num_processes=$NUM_GPUS \
         --mixed_precision=no \
-        train_mini.py \
+        train_tasuw.py \
         $TRAIN_ARGS \
         training.batch_size=64  # Reduce batch size per GPU for multi-GPU
     TRAIN_PID=$!

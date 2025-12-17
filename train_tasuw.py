@@ -9,6 +9,7 @@ import warnings
 import threading
 import itertools
 import numpy as np
+import h5py
 import subprocess
 import sys
 from tqdm import tqdm
@@ -433,6 +434,14 @@ class Trainer:
             time.sleep(1)
 
     def run(self):
+        export_cfg = getattr(self.cfg, "latent_export", None)
+        if export_cfg and export_cfg.enabled:
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                self.export_latents()
+            self.accelerator.wait_for_everyone()
+            return
+
         if self.accelerator.is_main_process:
             executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
@@ -490,6 +499,137 @@ class Trainer:
                     )
                     with lock:
                         self.job_set.update(jobs)
+
+    def export_latents(self):
+        """
+        Export projected visual latents to an HDF5 file compatible with the latent diffusion planner.
+        """
+        export_cfg = self.cfg.latent_export
+        resume_root = self.cfg.resume_folder
+        if resume_root in (None, "none", "", "null"):
+            raise ValueError("latent_export.enabled=true requires resume_folder to point to a trained model directory.")
+
+        ckpt_path = Path(resume_root) / "checkpoints" / "model_latest.pth"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}.")
+
+        output_path = export_cfg.output_path
+        if output_path in (None, "none", "", "null"):
+            output_path = Path(self.cfg.saved_folder) / "latent.hdf5"
+        else:
+            output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        splits = list(export_cfg.splits)
+        rgb_key = export_cfg.rgb_key
+        grid_size = export_cfg.latent_grid_size
+        if grid_size <= 0:
+            raise ValueError(f"latent_grid_size must be positive, got {grid_size}.")
+
+        mode = getattr(export_cfg, "mode", "trajectory").lower()
+        if mode not in ("trajectory", "slice"):
+            raise ValueError(f"latent_export.mode must be 'trajectory' or 'slice', got {mode}.")
+
+        if mode == "trajectory":
+            dataset_map = {
+                "train": self.train_traj_dset,
+                "valid": self.val_traj_dset,
+            }
+        else:
+            dataset_map = {
+                "train": self.datasets["train"],
+                "valid": self.datasets["valid"],
+            }
+
+        # Ensure model weights are loaded from resume_folder checkpoint
+        # Load checkpoint weights (ensures latest parameters even if init_models already restored them)
+        self.load_ckpt(ckpt_path)
+        module_names = [
+            "encoder",
+            "proprio_encoder",
+            "action_encoder",
+            "decoder",
+            "post_concat_projection",
+            "alignment_projection",
+            "predictor",
+        ]
+        for name in module_names:
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            module = module.to(self.device)
+            setattr(self, name, module)
+            if hasattr(self.model, name):
+                setattr(self.model, name, module)
+
+        self.model.eval()
+        prev_grad_state = torch.is_grad_enabled()
+        torch.set_grad_enabled(False)
+
+        total_eps = 0
+        min_z = None
+        max_z = None
+
+        with h5py.File(output_path, "w") as writer:
+            data_grp = writer.create_group("data")
+            data_grp.attrs["mode"] = mode
+            for split in splits:
+                dataset = dataset_map.get(split)
+                if dataset is None:
+                    log.warning(f"Unknown split '{split}' requested for latent export; skipping.")
+                    continue
+
+                for idx in tqdm(range(len(dataset)), desc=f"Exporting {split} latents"):
+                    if mode == "trajectory":
+                        obs, _, _, meta = dataset[idx]
+                    else:
+                        obs, _, _ = dataset[idx]
+                        meta = {}
+                    if "visual" not in obs:
+                        raise KeyError("Observation dictionary missing 'visual' key required for latent export.")
+
+                    obs_device = {
+                        key: value.unsqueeze(0).to(self.device)
+                        for key, value in obs.items()
+                    }
+
+                    with torch.no_grad():
+                        projected = self.model.encode_obs_projected(obs_device)["projected"]  # (1, T, P, D)
+                    projected = projected.squeeze(0).cpu().numpy()  # (T, P, D)
+
+                    T, P, D = projected.shape
+                    expected_patches = grid_size * grid_size
+                    if P != expected_patches:
+                        raise ValueError(
+                            f"Projected feature count {P} does not match latent_grid_size {grid_size} (expected {expected_patches})."
+                        )
+
+                    latents = projected.reshape(T, grid_size, grid_size, D).transpose(0, 3, 1, 2)  # (T, D, H, W)
+
+                    if mode == "trajectory":
+                        group_name = f"{split}_episode_{idx:05d}"
+                    else:
+                        group_name = f"{split}_slice_{idx:06d}"
+                    ep_grp = data_grp.create_group(group_name)
+                    latent_grp = ep_grp.create_group("latent")
+                    latent_grp.create_dataset(rgb_key, data=latents.astype(np.float32))
+
+                    episode_min = float(latents.min())
+                    episode_max = float(latents.max())
+                    min_z = episode_min if min_z is None else min(min_z, episode_min)
+                    max_z = episode_max if max_z is None else max(max_z, episode_max)
+                    total_eps += 1
+
+                    if meta and "shape" in meta:
+                        ep_grp.attrs["shape"] = meta["shape"]
+
+            data_grp.attrs["total"] = total_eps
+            if min_z is not None and max_z is not None:
+                data_grp.attrs["min_z"] = min_z
+                data_grp.attrs["max_z"] = max_z
+
+        torch.set_grad_enabled(prev_grad_state)
+        log.info(f"Saved projected latents for {total_eps} episodes to {output_path}")
 
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
