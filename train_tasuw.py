@@ -31,6 +31,9 @@ from gpu_utils.gpu_utils import auto_select_gpus
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+# Hydra resolver to add a dash only when a description is provided.
+OmegaConf.register_new_resolver("maybe_suffix", lambda s: f"-{s}" if s else "")
+
 
 class Trainer:
     def __init__(self, cfg):
@@ -114,7 +117,6 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
-                    mode="offline",
                 )
             else:
                 self.wandb_run = wandb.init(
@@ -123,7 +125,6 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
-                    mode="offline",
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
@@ -165,10 +166,12 @@ class Trainer:
         self.action_encoder = None
         self.proprio_encoder = None
         self.predictor = None
+        self.emb_decoder = None
         self.decoder = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
+        self.train_decoder_grad = self.cfg.model.train_decoder_grad
         log.info(f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
@@ -188,8 +191,13 @@ class Trainer:
         self._keys_to_save += (
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
-        self._keys_to_save += ["action_encoder", "proprio_encoder"]
-        self._keys_to_save += ["post_concat_projection"]
+        self._keys_to_save += (
+            ["emb_decoder", "emb_decoder_optimizer"] if self.train_decoder else []
+        )
+        self._keys_to_save += ["action_encoder", "proprio_encoder", "post_concat_projection"]
+        # select all the keys that are neural network modules
+        
+        
         # alignment_projection will be added after initialization if it exists
 
         self.init_models()
@@ -263,9 +271,9 @@ class Trainer:
         self.projection_input_dim = self.cfg.encoder_emb_dim + self.cfg.proprio_emb_dim * self.cfg.num_proprio_repeat
         self.post_concat_projection = hydra.utils.instantiate(
             self.cfg.projector,
-            in_features=self.projection_input_dim,
-            out_features=self.cfg.projected_dim,
-            act_embed_dim=self.cfg.action_emb_dim,
+            visual_emb_dim=self.cfg.encoder_emb_dim,
+            proprio_emb_dim=self.cfg.proprio_emb_dim * self.cfg.num_proprio_repeat,
+            projected_dim=self.cfg.projected_dim,
         )
         self.post_concat_projection = self.accelerator.prepare(self.post_concat_projection)
 
@@ -292,7 +300,7 @@ class Trainer:
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=self.cfg.projected_dim + action_emb_dim,  # Compute dynamically: projected_dim + action_emb_dim
+                    dim=self.cfg.projected_dim + action_emb_dim * self.cfg.num_action_repeat,  
                 )
             if not self.train_predictor:
                 for param in self.predictor.parameters():
@@ -320,6 +328,13 @@ class Trainer:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
                     
+        # initialize decoder to embedding space
+        self.emb_decoder = hydra.utils.instantiate(
+            self.cfg.emb_decoder,
+            in_dim=self.cfg.projected_dim,
+            out_dim=self.projection_input_dim,
+        )
+                    
         self.alignment_projection = None
         # Initialize alignment projection now that we know state_dim
         if hasattr(self.datasets['train'].dataset, 'states'):
@@ -337,6 +352,8 @@ class Trainer:
             action_encoder=self.action_encoder,
             predictor=self.predictor,
             decoder=self.decoder,
+            train_decoder_grad=self.train_decoder_grad,
+            emb_decoder=self.emb_decoder,
             post_concat_projection=self.post_concat_projection,
             alignment_projection=self.alignment_projection,
             proprio_dim=proprio_emb_dim,
@@ -346,8 +363,8 @@ class Trainer:
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
         
-        self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
-            self.encoder, self.predictor, self.decoder
+        self.encoder, self.predictor, self.decoder, self.emb_decoder = self.accelerator.prepare(
+            self.encoder, self.predictor, self.decoder, self.emb_decoder
         )
         
         if hasattr(self.cfg, 'alignment'):
@@ -412,6 +429,11 @@ class Trainer:
                 self.decoder.parameters(), lr=self.cfg.training.decoder_lr
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
+
+        self.emb_decoder_optimizer = torch.optim.Adam(
+            self.emb_decoder.parameters(), lr=self.cfg.training.decoder_lr
+        )
+        self.emb_decoder_optimizer = self.accelerator.prepare(self.emb_decoder_optimizer)
 
     def monitor_jobs(self, lock):
         """
@@ -689,6 +711,7 @@ class Trainer:
                 self.encoder_optimizer.step()
             if self.cfg.has_decoder and self.model.train_decoder:
                 self.decoder_optimizer.step()
+                self.emb_decoder_optimizer.step()
             if self.cfg.has_predictor and self.model.train_predictor:
                 self.predictor_optimizer.step()
                 self.action_encoder_optimizer.step()
@@ -944,6 +967,7 @@ class Trainer:
             for k in obs.keys():
                 obs_g[k] = obs[k].unsqueeze(0).to(self.device)
             actions = act.unsqueeze(0)
+            
             _z = self.model.encode_to_projected(obs_g, torch.nn.functional.pad(actions, (0, 0, 1, 0), mode='constant', value=0))
             
             z_g = {}
@@ -959,9 +983,8 @@ class Trainer:
                         obs[k][:n_past].unsqueeze(0).to(self.device)
                     )  # unsqueeze for batch, (b, t, c, h, w)
 
-                z_obses, z = self.model.rollout(obs_0, actions)
-
-                z_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
+                z_dct, z = self.model.rollout(obs_0, actions)
+                z_last = slice_trajdict_with_t(z_dct, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_last, z_g)
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
@@ -975,8 +998,9 @@ class Trainer:
                         ]
 
                 if self.cfg.has_decoder:
-                    visuals = self.model.decode_obs(z_obses)[0]["visual"]
-                    imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
+                    # z_emb = self.model.emb_decoder(z_dct["projected"])
+                    pred_obs, _ = self.model.decode(z_dct["projected"])
+                    imgs = torch.cat([obs["visual"], pred_obs["visual"][0].cpu()], dim=0)
                     self.plot_imgs(
                         imgs,
                         obs["visual"].shape[0],

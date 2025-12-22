@@ -1,10 +1,11 @@
 defaults:
   - _self_
-  - env: wall
+  - env: lift
   - encoder: dino
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae
+  - emb_decoder: emb_decoder
   - predictor: vit
   - projector: linear_temporal # linear vae
   - override hydra/launcher: basic
@@ -12,6 +13,7 @@ defaults:
 ckpt_base_path: ./outputs_${env.name}
 resume_folder: none #/data2/minghao/wm/outputs_wall/2025-10-03/04-35-04
 val_only: false
+description: "z2image-grad-decoder"
 
 latent_export:
   enabled: false
@@ -32,9 +34,9 @@ encoder:
 # Clean hydra config without any submitit
 hydra:
   run:
-    dir: ${ckpt_base_path}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${ckpt_base_path}/${now:%Y-%m-%d}/${now:%H-%M-%S}${maybe_suffix:${description}}
   sweep:
-    dir: ${ckpt_base_path}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${ckpt_base_path}/${now:%Y-%m-%d}/${now:%H-%M-%S}${maybe_suffix:${description}}
     subdir: ${hydra.job.num}
 
 # Single GPU training settings
@@ -87,6 +89,7 @@ model:
   alignment_dim: ${alignment_dim}
   train_predictor: True
   train_decoder: True
+  train_decoder_grad: False
   projected_dim: ${projected_dim}
 
 # Alignment settings with new architecture: 12D z-space, InfoNCE alignment, full dynamics

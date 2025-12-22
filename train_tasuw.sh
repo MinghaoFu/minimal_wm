@@ -10,12 +10,13 @@ cd /data2/minghao/wm_align/wm
 # eval "$(/usr/local/anaconda3/etc/profile.d/conda.sh)"
 conda activate wm310
 
+
+
 # Verify environment
 echo "🔍 Verifying environment..."
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
 
 # Set environment variables
-export WANDB_BASE_URL=https://api.bandw.top
 export HF_ENDPOINT=https://hf-mirror.com
 export HUGGINGFACE_HUB_CACHE=$HOME/.cache/huggingface
 export HF_HUB_ENABLE_HF_TRANSFER=1
@@ -171,7 +172,6 @@ TRAIN_EXIT_CODE=$?
 # Check training status
 if [ $TRAIN_EXIT_CODE -eq 0 ]; then
     echo "✅ Training completed successfully!"
-    echo "📊 Check WandB: https://wandb.ai/causality_/dino_wm_align_recon"
     echo "📁 Output directory: outputs/$(date +%Y-%m-%d)"
     if [ -n "$OUTPUT_DIR" ]; then
         echo "📂 Models and config saved to: $OUTPUT_DIR"

@@ -45,43 +45,44 @@ class LinearTemporalProjector(nn.Module):
         use_history: Whether to accept history information (for future extension)
     """
 
-    def __init__(self, in_features, out_features, act_embed_dim, use_history=True, num_hist=3):
+    def __init__(self, visual_emb_dim, proprio_emb_dim, projected_dim, use_history=True, act_embed_dim=None, num_hist=3):
         super().__init__()
 
-        self.in_features = in_features
-        self.out_features = out_features
-        self.act_embed_dim = act_embed_dim
+        self.in_features = visual_emb_dim + proprio_emb_dim
+        self.out_features = projected_dim
+        
         self.use_history = use_history
         self.num_hist = num_hist
 
         if use_history:
+            self.act_embed_dim = act_embed_dim
             # Linear layer for concatenated input: x_t + flattened history
             # x_t: in_features, history: num_hist * out_features
-            concat_features = in_features + num_hist * (out_features + act_embed_dim)
+            concat_features = self.in_features + num_hist * (self.out_features + self.act_embed_dim)
             # self.concat_projector = nn.Linear(concat_features, out_features)
-            self.concat_projector = nn.Linear(concat_features, out_features)
+            self.concat_projector = nn.Linear(concat_features, self.out_features)
             print(f"LinearTemporalProjector initialized with history:")
-            print(f"  - Input features: {in_features}")
-            print(f"  - History features: {num_hist} * {out_features} = {num_hist * out_features}")
+            print(f"  - Input features: {self.in_features}")
+            print(f"  - History features: {num_hist} * {self.out_features} = {num_hist * self.out_features}")
             print(f"  - Total input: {concat_features}")
-            print(f"  - Output features: {out_features}")
+            print(f"  - Output features: {self.out_features}")
         else:
-            concat_features = in_features
-            self.concat_projector = nn.Linear(in_features, out_features)
-            print(f"LinearTemporalProjector initialized (no history):")
-            print(f"  - Input features: {in_features}")
-            print(f"  - Output features: {out_features}")
+            self.concat_projector = nn.Linear(self.in_features, self.out_features)
+            print(f"LinearTemporalProjector initialized without history:")
+            print(f"  - Input features: {self.in_features}")
+            print(f"  - Output features: {self.out_features}")
 
-    def forward(self, o, act=None):
+    def forward(self, visual_emb, proprio_emb, act=None):
         """
-        o:   (B, T, P, in_features)
+        visual_emb:   (B, T, P, visual_emb_dim)
+        proprio_emb: (B, T, P, proprio_emb_dim)
         act: (B, T, P, act_embed_dim)
         return:
         z:   (B, T, P, out_features)
         """
-        B, T, P, _ = o.shape
+        B, T, P, _ = visual_emb.shape
         H = self.num_hist
-        device, dtype = o.device, o.dtype
+        device, dtype = visual_emb.device, visual_emb.dtype
         
         if self.use_history:
             assert act is not None
@@ -91,7 +92,7 @@ class LinearTemporalProjector(nn.Module):
             z_list = []
             for t in range(T):
                 hist_flat = torch.cat([z_hist, a_hist], dim=-1).reshape(B, P, -1)
-                x = torch.cat([hist_flat, o[:, t]], dim=-1)
+                x = torch.cat([hist_flat, visual_emb[:, t], proprio_emb[:, t]], dim=-1)
                 z_t = self.concat_projector(x)  # (B, P, out_features)
                 z_list.append(z_t)
                 if H > 0:
@@ -103,7 +104,7 @@ class LinearTemporalProjector(nn.Module):
 
             z = torch.stack(z_list, dim=1)  
         else: # now we use it for no history
-            z = self.concat_projector(o)
+            z = self.concat_projector(torch.cat([visual_emb, proprio_emb], dim=-1))
         return z
 
     def __repr__(self):

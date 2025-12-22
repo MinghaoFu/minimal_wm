@@ -173,7 +173,6 @@ class Decoder(nn.Module):
     def forward(self, input):
         return self.blocks(input)
 
-
 class VQVAE(nn.Module):
     def __init__(
         self,
@@ -241,3 +240,136 @@ class VQVAE(nn.Module):
         quant_b = quant_b.permute(0, 3, 1, 2)
         dec = self.decode(quant_b)
         return dec
+
+class Emb_Decoder(nn.Module):
+    """
+    Decode patch embeddings (b, t, p, dim_in) to higher-res patch embeddings
+    (b, t, n_patches_out, dim_out), where both the spatial grid (patch count)
+    and embedding dim are "upsampled".
+
+    Args:
+        in_dim:      输入 embedding 维度 dim_in
+        out_dim:     输出 embedding 维度 dim_out
+        channel:     中间通道数（跟你原来 Decoder 的 channel 一样用法）
+        n_res_block: 残差块个数
+        n_res_channel: 残差块里间接通道数
+        stride:      空间上采样倍率（2 / 4 / 8），决定 patch 数量放大倍数
+                     n_patches_out = n_patches_in * (stride ** 2)
+    """
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        channel=128,
+        n_res_block=2,
+        n_res_channel=32,
+        stride=4,
+        keep_num_patches=False,
+    ):
+        super().__init__()
+
+        self.stride = stride
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.keep_num_patches = keep_num_patches
+
+        # 直接复用你上面定义好的 Decoder：
+        # 输入通道 in_dim，输出通道 out_dim，空间上采样由 stride 决定
+        self.dec = Decoder(
+            in_channel=in_dim,
+            out_channel=out_dim,
+            channel=channel,
+            n_res_block=n_res_block,
+            n_res_channel=n_res_channel,
+            stride=stride,
+        )
+
+    def forward(self, x):
+        """
+        x: (b, t, n_patches_in, in_dim)
+        return: (b, t, n_patches_out, out_dim)
+        其中 n_patches_out = (h_in * stride) * (w_in * stride)
+                          = n_patches_in * (stride ** 2)
+        """
+        b, t, n_patches, dim = x.shape
+        assert dim == self.in_dim, f"Expected in_dim={self.in_dim}, got {dim}"
+
+        # 假设 patch 是正方形网格：n_patches = h * w
+        num_side = int(n_patches ** 0.5)
+        assert num_side * num_side == n_patches, \
+            f"n_patches={n_patches} must be square, like 8x8=64"
+
+        # (b, t, (h w), c) -> (b*t, c, h, w)，方便走 Conv/ConvTranspose
+        x = rearrange(x, "b t (h w) c -> (b t) c h w", h=num_side, w=num_side)
+
+        with torch.backends.cudnn.flags(enabled=False):
+            y = self.dec(x)  # (b*t, out_dim, h_out, w_out)
+
+        _, c_out, h_out, w_out = y.shape
+        assert c_out == self.out_dim
+
+        if self.keep_num_patches and (h_out != num_side or w_out != num_side):
+            y = F.interpolate(
+                y, size=(num_side, num_side), mode="bilinear", align_corners=False
+            )
+            h_out = w_out = num_side
+
+        # 展平成新的 patch 序列：(b*t, c_out, h_out, w_out) -> (b, t, (h_out*w_out), c_out)
+        y = rearrange(y, "(b t) c h w -> b t (h w) c", b=b, t=t)
+
+        return y
+    
+class linear_decoder(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+    ):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.linear = nn.Linear(in_dim, out_dim)
+        
+    def forward(self, x):
+        return self.linear(x)
+
+if __name__ == "__main__":
+    import torch
+
+    # 参数
+    b = 1
+    t = 3
+    dim_in = 64
+    dim_out = 128
+    stride = 1  # 上采样倍数
+    p = 196   # patch 数量 = 4 x 4
+
+    # 创建 EmbDecoder
+    decoder = Emb_Decoder(
+        in_dim=dim_in,
+        out_dim=dim_out,
+        channel=128,
+        n_res_block=2,
+        n_res_channel=32,
+        stride=stride,
+    )
+
+    # (b, t, p, dim_in)
+    x = torch.randn(b, t, p, dim_in)
+
+    print("Input shape:", x.shape)
+    print("num patches input =", p)
+
+    # 前向
+    y = decoder(x)
+
+    print("Output shape:", y.shape)
+
+    # 检查 patch 数是否正确放大
+    p_out = p * (stride ** 2)
+    print("Expected output patches:", p_out)
+    print("Actual output patches:  ", y.shape[2])
+
+    print("\nCheck:")
+    print("Correct patch count?  ", y.shape[2] == p_out)
+    print("Correct embedding dim?", y.shape[-1] == dim_out)
