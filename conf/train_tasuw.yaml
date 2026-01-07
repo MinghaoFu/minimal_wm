@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: lift
+  - env: mmbench
   - encoder: dino
   - action_encoder: proprio
   - proprio_encoder: proprio
@@ -13,7 +13,7 @@ defaults:
 ckpt_base_path: ./outputs_${env.name}
 resume_folder: none #/data2/minghao/wm/outputs_wall/2025-10-03/04-35-04
 val_only: false
-description: "z2image-grad-decoder"
+description: ""
 
 latent_export:
   enabled: false
@@ -64,20 +64,17 @@ has_predictor: True # set this to False for only training a decoder
 has_decoder: True # Keep decoder - uses original 384D DINO features like original DINO-WM
 
 encoder_emb_dim: 384
-# action encoder - 适配 robomimic 7D 动作空间 (6关节+夹爪)
-action_emb_dim: 16  # 7D -> 16D embedding
+action_emb_dim: 16 
 num_action_repeat: 1
 
-# proprio encoder - 适配 robomimic 16D proprio空间 (机器人状态+速度)
+
 proprio_emb_dim: 64
 num_proprio_repeat: 1
 
-# Temporal projector with patch compression configuration
-# Input: x_t (416 dim, 196 patches) + z_{t-1} history
-# Output: z_t (64 dim, 49 patches compressed)
 projected_dim: 64  # Target compressed dimension
 compressed_patches: 49  # Target compressed patch count (7x7)
 original_patches: 196   # Original patch count (14x14)
+
 alignment_dim: 16  # InfoNCE alignment with proprio dimension
 
 model:

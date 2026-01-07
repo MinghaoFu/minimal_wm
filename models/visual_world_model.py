@@ -263,7 +263,7 @@ class VWorldModel(nn.Module):
         input :   z: (b, num_frames, num_patches, emb_dim)
         output: obs: (b, num_frames, 3, img_size, img_size)
         """
-        z_obs = self.separate_s_a(z)
+        z_obs = {"visual": z}
         obs, diff = self.decode_obs(z_obs)
         return obs, diff
 
@@ -284,8 +284,8 @@ class VWorldModel(nn.Module):
         input :   z: (b, num_frames, num_patches, emb_dim)
         output: obs: (b, num_frames, 3, img_size, img_size)
         """
-        b, num_frames, num_patches, emb_dim = z_obs["projected"].shape
-        visual, diff = self.decoder(z_obs["projected"])  # (b*num_frames, 3, 224, 224)
+        b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
+        visual, diff = self.decoder(z_obs["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
         obs = {
             "visual": visual,
@@ -383,13 +383,14 @@ class VWorldModel(nn.Module):
             if self.decoder is not None:
                 b, num_frames, num_patches, emb_dim = z_pred.shape
                 z_pred_emb = self.emb_decoder(self.separate_s_a(z_pred)['projected'])
+                visual_emb_tgt = z_dct['visual'][:, self.num_hist :, ...]
                 if self.train_decoder_grad:
-                    obs_pred, diff_pred = self.decode(self.separate_s_a(z_pred)['projected'])
+                    obs_pred, diff_pred = self.decode(z_pred_emb)
                 else:
-                    obs_pred, diff_pred = self.decode(self.separate_s_a(z_pred)['projected'].detach())
+                    obs_pred, diff_pred = self.decode(z_pred_emb.detach())
                 visual_pred = obs_pred['visual']
                 recon_loss_pred = self.decoder_criterion(visual_pred, visual_tgt)
-                emb_recon_loss_pred = self.emb_decoder_criterion(self.separate_emb(z_pred_emb)['visual'], z_dct['visual'][:, self.num_hist :, ...])
+                emb_recon_loss_pred = self.emb_decoder_criterion(z_pred_emb, visual_emb_tgt)
                 decoder_loss_pred = (
                     recon_loss_pred + emb_recon_loss_pred + self.decoder_latent_loss_weight * diff_pred
                 )
@@ -473,12 +474,12 @@ class VWorldModel(nn.Module):
             # Following original DINO WM: pass full features to decoder
             z_emb_reconstructed = self.emb_decoder(self.separate_s_a(z)['projected'])
             if self.train_decoder_grad:
-                obs_reconstructed, diff_reconstructed = self.decode(self.separate_s_a(z)['projected'])
+                obs_reconstructed, diff_reconstructed = self.decode(z_emb_reconstructed)
             else:
-                obs_reconstructed, diff_reconstructed = self.decode(self.separate_s_a(z)['projected'].detach())
+                obs_reconstructed, diff_reconstructed = self.decode(z_emb_reconstructed.detach())
             visual_reconstructed = obs_reconstructed["visual"]
             recon_loss_reconstructed = self.decoder_criterion(visual_reconstructed, obs['visual'])
-            emb_recon_loss_reconstructed = self.emb_decoder_criterion(self.separate_emb(z_emb_reconstructed)['visual'], z_dct['visual'])
+            emb_recon_loss_reconstructed = self.emb_decoder_criterion(z_emb_reconstructed, z_dct['visual'])
             decoder_loss_reconstructed = (
                 recon_loss_reconstructed + emb_recon_loss_reconstructed
                 + self.decoder_latent_loss_weight * diff_reconstructed

@@ -43,7 +43,7 @@ class Trainer:
             log.info(f"Model saved dir: {cfg['saved_folder']}")
         cfg_dict = cfg_to_dict(cfg)
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
-        model_name += f"_{self.cfg.env.name}_align_recon_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
+        model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
         # Check if we should use multiple GPUs (only for SLURM multirun)
         if HydraConfig.get().mode == RunMode.MULTIRUN:
@@ -322,7 +322,7 @@ class Trainer:
                 else:
                     self.decoder = hydra.utils.instantiate(
                         self.cfg.decoder,
-                        emb_dim=self.cfg.projected_dim,
+                        emb_dim=self.cfg.encoder_emb_dim,
                     )
             if not self.train_decoder:
                 for param in self.decoder.parameters():
@@ -332,7 +332,7 @@ class Trainer:
         self.emb_decoder = hydra.utils.instantiate(
             self.cfg.emb_decoder,
             in_dim=self.cfg.projected_dim,
-            out_dim=self.projection_input_dim,
+            out_dim=self.cfg.encoder_emb_dim,
         )
                     
         self.alignment_projection = None
@@ -998,8 +998,8 @@ class Trainer:
                         ]
 
                 if self.cfg.has_decoder:
-                    # z_emb = self.model.emb_decoder(z_dct["projected"])
-                    pred_obs, _ = self.model.decode(z_dct["projected"])
+                    z_emb = self.model.emb_decoder(z_dct["projected"])
+                    pred_obs, _ = self.model.decode(z_emb)
                     imgs = torch.cat([obs["visual"], pred_obs["visual"][0].cpu()], dim=0)
                     self.plot_imgs(
                         imgs,
