@@ -1,0 +1,18 @@
+name: mmbench
+args: []
+kwargs: {}
+
+dataset_name: atari-alien #acrobot-swingup
+
+dataset:
+  _target_: "datasets.mmbench_dset.load_mmbench_slice_train_val"
+  n_rollout: null
+  normalize_action: ${normalize_action}
+  data_path: /data2/minghao/data/mmbench/${env.dataset_name}
+  image_size: ${img_size}
+  transform:
+    _target_: "datasets.img_transforms.default_transform"
+    img_size: ${img_size}
+
+decoder_path: null
+num_workers: 16

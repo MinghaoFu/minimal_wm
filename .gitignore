@@ -41,7 +41,6 @@ nohup.out
 # Environment
 .env
 .venv
-env/
 venv/
 
 # Hydra outputs
