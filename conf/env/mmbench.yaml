@@ -8,7 +8,7 @@ dataset:
   _target_: "datasets.mmbench_dset.load_mmbench_slice_train_val"
   n_rollout: null
   normalize_action: ${normalize_action}
-  data_path: /data2/minghao/data/mmbench/${env.dataset_name}
+  data_path: ${oc.env:MMBENCH_DATA_DIR,/mnt/data_nvme1/minghao.fu/newt_rollouts}/${env.dataset_name}
   image_size: ${img_size}
   transform:
     _target_: "datasets.img_transforms.default_transform"

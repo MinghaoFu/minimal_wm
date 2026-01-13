@@ -20,14 +20,14 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Step 1/3: Downloading dataset..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-./download_robomimic_datasets.sh $TASK $DATASET_TYPE
+./download_datasets.sh $TASK $DATASET_TYPE
 
 # Step 2: Convert to images
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Step 2/3: Converting to image observations (384x384)..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-./convert_to_images.sh $TASK $DATASET_TYPE 384
+./convert_to_wm_input.sh $TASK $DATASET_TYPE 384
 
 # Step 3: Convert to DINO WM format
 echo ""

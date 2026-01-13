@@ -1,4 +1,5 @@
 import os
+import json
 import pickle
 from pathlib import Path
 from typing import Callable, Optional
@@ -9,7 +10,7 @@ import torch
 from decord import VideoReader
 from einops import rearrange
 
-from .traj_dset import TrajDataset, TrajSlicerDataset
+from .traj_dset import TrajDataset, TrajSlicerDataset, TrajSubset
 
 decord.bridge.set_bridge("torch")
 
@@ -31,6 +32,7 @@ class MMBenchDataset(TrajDataset):
         self.relative = relative
         self.normalize_action = normalize_action
         self.image_size = image_size
+        self.task_name = self.data_path.name
 
         self.states = torch.load(self.data_path / "states.pth").float()
         if relative:
@@ -62,6 +64,7 @@ class MMBenchDataset(TrajDataset):
         else:
             self.velocities = None
 
+        self._maybe_trim_padded_dims()
         self.action_dim = self.actions.shape[-1]
         self.state_dim = self.states.shape[-1]
         self.proprio_dim = self.proprios.shape[-1]
@@ -73,6 +76,15 @@ class MMBenchDataset(TrajDataset):
             self.state_std = torch.load(self.data_path / "state_std.pth")
             self.proprio_mean = torch.load(self.data_path / "proprio_mean.pth")
             self.proprio_std = torch.load(self.data_path / "proprio_std.pth")
+            if self.action_mean.shape[-1] != self.action_dim:
+                self.action_mean = self.action_mean[: self.action_dim]
+                self.action_std = self.action_std[: self.action_dim]
+            if self.state_mean.shape[-1] != self.state_dim:
+                self.state_mean = self.state_mean[: self.state_dim]
+                self.state_std = self.state_std[: self.state_dim]
+            if self.proprio_mean.shape[-1] != self.proprio_dim:
+                self.proprio_mean = self.proprio_mean[: self.proprio_dim]
+                self.proprio_std = self.proprio_std[: self.proprio_dim]
         else:
             self.action_mean = torch.zeros(self.action_dim)
             self.action_std = torch.ones(self.action_dim)
@@ -89,6 +101,43 @@ class MMBenchDataset(TrajDataset):
             raise FileNotFoundError(f"Missing obs directory: {obs_dir}")
         if not any(obs_dir.glob("episode_*.mp4")):
             raise FileNotFoundError(f"No episode_*.mp4 found in {obs_dir}")
+
+    def _maybe_trim_padded_dims(self):
+        # Trim padded trailing dims for actions/states/proprios, if present.
+        action_dim = self._get_task_action_dim()
+        if action_dim is not None and self.actions.shape[-1] > action_dim:
+            self.actions = self.actions[..., :action_dim]
+
+        self.states = self._trim_trailing_zeros(self.states)
+        self.proprios = self._trim_trailing_zeros(self.proprios)
+
+    def _get_task_action_dim(self):
+        tasks_fp = Path("/home/minghao.fu/workspace/newt/tasks.json")
+        if not tasks_fp.exists():
+            return None
+        try:
+            with open(tasks_fp, "r") as f:
+                tasks = json.load(f)
+            info = tasks.get(self.task_name)
+            if info is None:
+                return None
+            return int(info.get("action_dim"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _trim_trailing_zeros(tensor):
+        # Only trim if trailing dims are exactly zero across all samples/timesteps.
+        if tensor.numel() == 0:
+            return tensor
+        flat = tensor.reshape(-1, tensor.shape[-1])
+        nonzero = (flat.abs().max(dim=0).values > 0)
+        if not nonzero.any():
+            return tensor[..., :1]
+        last_idx = int(nonzero.nonzero()[-1]) + 1
+        if last_idx == tensor.shape[-1]:
+            return tensor
+        return tensor[..., :last_idx]
 
     def get_seq_length(self, idx):
         return self.seq_lengths[idx]
@@ -136,6 +185,7 @@ def load_mmbench_slice_train_val(
     data_path,
     n_rollout=50,
     normalize_action=True,
+    split_ratio=0.8,
     num_hist=0,
     num_pred=0,
     frameskip=0,
@@ -144,27 +194,41 @@ def load_mmbench_slice_train_val(
 ):
     train_path = os.path.join(data_path, "train")
     val_path = os.path.join(data_path, "val")
-    if not (os.path.exists(train_path) and os.path.exists(val_path)):
-        raise FileNotFoundError(
-            f"Expected pre-split train/val at {train_path} and {val_path}"
+    if os.path.exists(train_path) and os.path.exists(val_path):
+        train_dset = MMBenchDataset(
+            data_path=train_path,
+            n_rollout=n_rollout,
+            transform=transform,
+            normalize_action=normalize_action,
+            with_velocity=with_velocity,
+            image_size=image_size,
+        )
+        val_dset = MMBenchDataset(
+            data_path=val_path,
+            n_rollout=n_rollout,
+            transform=transform,
+            normalize_action=normalize_action,
+            with_velocity=with_velocity,
+            image_size=image_size,
+        )
+    else:
+        print(f"No train/val split found, using single dataset at {data_path}")
+        full_dset = MMBenchDataset(
+            data_path=data_path,
+            n_rollout=n_rollout,
+            transform=transform,
+            normalize_action=normalize_action,
+            with_velocity=with_velocity,
+            image_size=image_size,
         )
 
-    train_dset = MMBenchDataset(
-        data_path=train_path,
-        n_rollout=n_rollout,
-        transform=transform,
-        normalize_action=normalize_action,
-        with_velocity=with_velocity,
-        image_size=image_size,
-    )
-    val_dset = MMBenchDataset(
-        data_path=val_path,
-        n_rollout=n_rollout,
-        transform=transform,
-        normalize_action=normalize_action,
-        with_velocity=with_velocity,
-        image_size=image_size,
-    )
+        total_samples = len(full_dset)
+        train_size = int(total_samples * split_ratio)
+        val_size = total_samples - train_size
+        print(f"Total samples: {total_samples}, Train: {train_size}, Val: {val_size}")
+
+        train_dset = TrajSubset(full_dset, list(range(train_size)))
+        val_dset = TrajSubset(full_dset, list(range(train_size, total_samples)))
 
     num_frames = num_hist + num_pred
     train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)

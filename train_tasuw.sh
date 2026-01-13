@@ -5,9 +5,6 @@
 
 # Environment setup
 echo "🔧 Setting up environment..."
-cd /data2/minghao/wm_align/wm
-# export PATH="/usr/local/anaconda3/bin:$PATH"
-# eval "$(/usr/local/anaconda3/etc/profile.d/conda.sh)"
 conda activate wm310
 
 
@@ -32,6 +29,7 @@ PROJECTED_DIM=${PROJECTED_DIM:-64}
 ENV=${ENV:-""}
 DATASET_NAME=${DATASET_NAME:-""}
 ENV_OVERRIDE=""
+ENV_DATASET_NAME=""
 
 echo "🚀 Starting DINO World Model training..."
 echo "Config: $CONFIG_NAME"
@@ -40,12 +38,40 @@ echo "Epochs: $EPOCHS"
 echo "Number of GPUs: $NUM_GPUS"
 if [ -n "$DATASET_NAME" ]; then
     echo "Dataset override: $DATASET_NAME"
-    ENV_OVERRIDE="robomimic_${DATASET_NAME}_full"
+    if [ -z "$ENV" ]; then
+        if [ -f "./conf/env/${DATASET_NAME}.yaml" ]; then
+            ENV="$DATASET_NAME"
+        else
+            # Check if this is an MMBench task name.
+            if python - <<'PY'
+import json
+from pathlib import Path
+tasks_fp = Path("/home/minghao.fu/workspace/newt/tasks.json")
+if tasks_fp.exists():
+    data = json.load(open(tasks_fp))
+    import os
+    name = os.environ.get("DATASET_NAME", "")
+    raise SystemExit(0 if name in data else 1)
+raise SystemExit(1)
+PY
+            then
+                ENV="mmbench"
+                ENV_DATASET_NAME="$DATASET_NAME"
+            else
+                ENV_OVERRIDE="robomimic_${DATASET_NAME}_full"
+            fi
+        fi
+    fi
 else
     echo "Dataset override: (using config default)"
 fi
 if [ -n "$RESUME" ]; then
     echo "Resume from: $RESUME"
+fi
+
+# Respect pre-set CUDA_VISIBLE_DEVICES (e.g. from run_tasuw_tasks.sh)
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    GPU_IDS="$CUDA_VISIBLE_DEVICES"
 fi
 
 # GPU selection - use simple approach that works with PyTorch
@@ -71,13 +97,13 @@ fi
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "🔍 Running debug training (1 epoch)..."
     DEBUG_ARGS="--config-name=$CONFIG_NAME training.epochs=1 debug=true"
-    if [ -n "$DATASET_NAME" ]; then
-        DEBUG_ARGS="$DEBUG_ARGS dataset_name=$DATASET_NAME"
-    fi
     if [ -n "$ENV_OVERRIDE" ]; then
         DEBUG_ARGS="$DEBUG_ARGS env=$ENV_OVERRIDE"
     elif [ -n "$ENV" ]; then
         DEBUG_ARGS="$DEBUG_ARGS env=$ENV"
+        if [ -n "$ENV_DATASET_NAME" ]; then
+            DEBUG_ARGS="$DEBUG_ARGS env.dataset_name=$ENV_DATASET_NAME"
+        fi
     fi
     if [ "$NUM_GPUS" -eq 1 ]; then
         python train_tasuw.py $DEBUG_ARGS
@@ -100,14 +126,14 @@ echo "🎯 Starting full training..."
 
 # Set up training command with optional resume path
 TRAIN_ARGS="--config-name=$CONFIG_NAME training.epochs=$EPOCHS projected_dim=$PROJECTED_DIM"
-if [ -n "$DATASET_NAME" ]; then
-    TRAIN_ARGS="$TRAIN_ARGS dataset_name=$DATASET_NAME"
-fi
 if [ -n "$ENV_OVERRIDE" ]; then
     TRAIN_ARGS="$TRAIN_ARGS env=$ENV_OVERRIDE"
 elif [ -n "$ENV" ]; then
     TRAIN_ARGS="$TRAIN_ARGS env=$ENV"
-fi
+    if [ -n "$ENV_DATASET_NAME" ]; then
+        TRAIN_ARGS="$TRAIN_ARGS env.dataset_name=$ENV_DATASET_NAME"
+    fi
+    fi
 if [ -n "$RESUME" ]; then
     echo "📂 Will resume from checkpoint: $RESUME"
     TRAIN_ARGS="$TRAIN_ARGS +saved_folder=$RESUME"
@@ -155,7 +181,7 @@ fi
 
 # Wait a moment for output directory to be created, then copy models and config
 echo "⏳ Waiting for training to initialize and create output directory..."
-sleep 30
+sleep 3
 
 # Find the most recent output directory created today
 OUTPUT_DIR=$(find ./outputs/$(date +%Y-%m-%d) -maxdepth 1 -type d -name "$(date +%H)*" 2>/dev/null | sort | tail -1)

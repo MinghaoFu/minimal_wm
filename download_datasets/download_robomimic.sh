@@ -1,21 +1,20 @@
 #!/bin/bash
 
-# Download Additional Robomimic Tasks (square, lift, etc.)
-# Based on CLAUDE.md setup script
+dataset_dir="/mnt/data_nvme1/minghao.fu/"
+robomimic_dir="/home/minghao.fu/workspace/robomimic"
+# Set paths
+robomimic_dataset_dir="${dataset_dir}/robomimic"
 
 set -e  # Exit on any error
+# download dino wm datasets
+pip install osfclient
 
-echo "🚀 Downloading Additional Robomimic Tasks"
-echo "========================================="
+mkdir -p $dataset_dir
+mkdir -p $robomimic_dataset_dir
 
-# Activate conda environment
-export PATH="$HOME/miniconda/bin:$PATH"
-eval "$(/home/ubuntu/miniconda/bin/conda shell.bash hook)"
-conda activate wm310
-
-# Set paths
-dataset_dir="/home/ubuntu/minghao/data/robomimic"
-robomimic_dir="/home/ubuntu/minghao/robomimic"
+cd $dataset_dir
+export OSF_VIEWONLY=a56a296ce3b24cceaf408383a175ce28s
+osf -p bmw48 clone .
 
 # Check if robomimic is installed
 if [ ! -d "$robomimic_dir" ]; then
@@ -25,7 +24,7 @@ if [ ! -d "$robomimic_dir" ]; then
 fi
 
 # Define tasks to download (you can modify this list)
-tasks=("lift" "square" "transport" "tool_hang")
+tasks=("lift" "square" "transport" "tool_hang" "can")
 
 # Define dataset types (default to PH - Paired Human demos)
 dataset_types=("ph")
@@ -45,7 +44,7 @@ echo "📊 Dataset types: ${dataset_types[*]}"
 echo ""
 
 # Create dataset directory if it doesn't exist
-mkdir -p $dataset_dir
+mkdir -p $robomimic_dataset_dir
 
 # Download and convert each task
 for task in "${tasks[@]}"; do
@@ -59,10 +58,10 @@ for task in "${tasks[@]}"; do
             --tasks $task \
             --dataset_types $dataset_type \
             --hdf5_types all \
-            --download_dir $dataset_dir
+            --download_dir $robomimic_dataset_dir
 
         # Check if download was successful
-        task_dir="$dataset_dir/$task/$dataset_type"
+        task_dir="$robomimic_dataset_dir/$task/$dataset_type"
         if [ ! -f "$task_dir/demo_v15.hdf5" ]; then
             echo "❌ Download failed for $task ($dataset_type)"
             continue
@@ -88,13 +87,12 @@ for task in "${tasks[@]}"; do
         echo "✅ Image conversion completed: $task_dir/image_384_v15.hdf5"
 
         # Step 3: Convert to DINO WM format (if conversion script exists)
-        output_path="$dataset_dir/$task/${dataset_type}_convert"
+        output_path="$robomimic_dataset_dir/$task/${dataset_type}_convert"
 
-        if [ -f "/home/ubuntu/minghao/wm/convert_robomimic_to_dino_wm_final.py" ]; then
+        if [ -f "./convert_to_wm_input.py" ]; then
             echo "🔄 Converting to DINO WM format..."
 
-            cd /home/ubuntu/minghao/wm
-            python convert_robomimic_to_dino_wm_final.py \
+            python convert_to_wm_input.py \
                 --source_dir "$task_dir" \
                 --save_data_dir "$output_path"
 
@@ -119,11 +117,11 @@ echo "📊 Available datasets:"
 echo "======================"
 for task in "${tasks[@]}"; do
     for dataset_type in "${dataset_types[@]}"; do
-        task_dir="$dataset_dir/$task/$dataset_type"
+        task_dir="$robomimic_dataset_dir/$task/$dataset_type"
         if [ -d "$task_dir" ]; then
             echo "✅ $task ($dataset_type): $task_dir"
-            if [ -d "$dataset_dir/$task/${dataset_type}_convert" ]; then
-                echo "   └── DINO WM format: $dataset_dir/$task/${dataset_type}_convert"
+            if [ -d "$robomimic_dataset_dir/$task/${dataset_type}_convert" ]; then
+                echo "   └── DINO WM format: $robomimic_dataset_dir/$task/${dataset_type}_convert"
             fi
         fi
     done
@@ -136,5 +134,5 @@ echo "   Change data_path to point to your desired task directory"
 echo ""
 echo "📋 Example paths:"
 for task in "${tasks[@]}"; do
-    echo "   - $task: $dataset_dir/$task/ph_convert"
+    echo "   - $task: $robomimic_dataset_dir/$task/ph_convert"
 done
