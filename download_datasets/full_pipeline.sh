@@ -1,47 +1,37 @@
 #!/bin/bash
-# Complete dataset preparation pipeline - adapted for /data2/minghao paths
+# Complete dataset preparation pipeline for WM datasets.
 # Usage: ./full_pipeline.sh [task]
 # Example: ./full_pipeline.sh square
 
-set -e
+set -euo pipefail
 
-TASK=${1:-can}
+TASK=${1:-} # tasks=("lift" "square" "transport" "tool_hang" "can")
+# go through all tasks
+TASKS = ("lift" "square" "transport" "tool_hang" "can")
 DATASET_TYPE="ph"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="/workspace/minghao/data/robomimic"
 
 echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║        Robomimic Dataset Full Pipeline for DINO WM            ║"
+echo "║        Download and Convert Datasets Pipeline for WM           ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Task: $TASK"
 echo "Dataset type: $DATASET_TYPE"
 echo ""
 
-# Step 1: Download dataset
+# Step 1: Download, image conversion, and DINO WM conversion (all-in-one)
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 1/3: Downloading dataset..."
+echo "Step 1: Downloading + converting (images & DINO WM)..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-./download_datasets.sh $TASK $DATASET_TYPE
-
-# Step 2: Convert to images
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 2/3: Converting to image observations (384x384)..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-./convert_to_wm_input.sh $TASK $DATASET_TYPE 384
-
-# Step 3: Convert to DINO WM format
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 3/3: Converting to DINO WM format..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-./convert_to_dino_wm.sh $TASK
+bash "$SCRIPT_DIR/download_datasets.sh" "$TASK" "$DATASET_TYPE"
 
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║                    ✅ Pipeline Complete!                       ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Dataset ready at: /data2/minghao/data/robomimic/$TASK/${DATASET_TYPE}_convert_full"
+echo "Dataset ready at: $DATA_DIR/$TASK/${DATASET_TYPE}_convert_full"
 echo ""
 echo "Next steps:"
 echo "  1. Update your config file to point to the new dataset path"
