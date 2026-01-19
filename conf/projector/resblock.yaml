@@ -1,0 +1,6 @@
+_target_: models.resblock_projector.ResBlockProjector
+hidden_channels: 256
+num_blocks: 2
+kernel_size: 3
+dropout: 0.1
+activation: ReLU

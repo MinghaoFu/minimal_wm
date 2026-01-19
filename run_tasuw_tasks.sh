@@ -6,7 +6,17 @@ PID_FILE="logs/train_tasuw.pids"
 JOB_FILE="logs/train_tasuw.jobs"
 GPU_IDS="${GPU_IDS:-auto}"
 TASKS=(
-    cartpole-balance 
+    lift
+    can
+    square
+    tool_hang
+    transport
+    point_maze
+    pusht
+    wall
+    # walker-stand
+    # walker-walk
+    # walker-run
     # acrobot-swingup
     # hopper-stand
     # hopper-hop

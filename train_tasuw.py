@@ -33,6 +33,11 @@ log = logging.getLogger(__name__)
 
 # Hydra resolver to add a dash only when a description is provided.
 OmegaConf.register_new_resolver("maybe_suffix", lambda s: f"-{s}" if s else "")
+# Resolve output name for ckpt paths: use dataset_name for mmbench, else env name.
+OmegaConf.register_new_resolver(
+    "env_output_name",
+    lambda env_name, dataset_name: dataset_name if env_name == "mmbench" and dataset_name else env_name,
+)
 
 
 class Trainer:
@@ -194,7 +199,13 @@ class Trainer:
         self._keys_to_save += (
             ["emb_decoder", "emb_decoder_optimizer"] if self.train_decoder else []
         )
-        self._keys_to_save += ["action_encoder", "proprio_encoder", "post_concat_projection"]
+        self._keys_to_save += [
+            "action_encoder",
+            "proprio_encoder",
+            "post_concat_projection",
+            "post_concat_projection_optimizer",
+            "alignment_projection_optimizer",
+        ]
         # select all the keys that are neural network modules
         
         
@@ -208,6 +219,7 @@ class Trainer:
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
+        self._reported_grad_presence = False
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -296,11 +308,14 @@ class Trainer:
 
         if self.cfg.has_predictor:
             if self.predictor is None:
+                raw_proprio_dim = self.datasets["train"].proprio_dim
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=self.cfg.projected_dim + action_emb_dim * self.cfg.num_action_repeat,  
+                    dim=self.cfg.projected_dim
+                    + action_emb_dim * self.cfg.num_action_repeat
+                    + raw_proprio_dim,
                 )
             if not self.train_predictor:
                 for param in self.predictor.parameters():
@@ -358,9 +373,11 @@ class Trainer:
             alignment_projection=self.alignment_projection,
             proprio_dim=proprio_emb_dim,
             action_dim=action_emb_dim,
+            raw_proprio_dim=self.datasets["train"].proprio_dim,
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
+            open_alignment=getattr(self.cfg, "open_alignment", False),
         )
         
         self.encoder, self.predictor, self.decoder, self.emb_decoder = self.accelerator.prepare(
@@ -390,6 +407,16 @@ class Trainer:
                 self.model.alignment_feature_selection = self.cfg.alignment.alignment_feature_selection
             else:
                 self.model.alignment_feature_selection = 'isolate'  # Default: isolate first 64 dims
+
+        if hasattr(self.cfg, "proprio_pred"):
+            if hasattr(self.cfg.proprio_pred, "loss_type"):
+                self.model.proprio_pred_loss_type = self.cfg.proprio_pred.loss_type
+            if hasattr(self.cfg.proprio_pred, "space"):
+                self.model.proprio_pred_space = self.cfg.proprio_pred.space
+            if hasattr(self.cfg.proprio_pred, "weight"):
+                self.model.proprio_pred_loss_weight = self.cfg.proprio_pred.weight
+            if hasattr(self.cfg.proprio_pred, "infonce_temp"):
+                self.model.proprio_infonce_temp = self.cfg.proprio_pred.infonce_temp
         
         self.model = self.model.to(self.accelerator.device)
         model_ckpt = Path(self.cfg.resume_folder if self.cfg.resume_folder is not None else self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
@@ -434,6 +461,75 @@ class Trainer:
             self.emb_decoder.parameters(), lr=self.cfg.training.decoder_lr
         )
         self.emb_decoder_optimizer = self.accelerator.prepare(self.emb_decoder_optimizer)
+
+        self.post_concat_projection_optimizer = torch.optim.Adam(
+            self.post_concat_projection.parameters(),
+            lr=self.cfg.training.decoder_lr,
+        )
+        self.post_concat_projection_optimizer = self.accelerator.prepare(
+            self.post_concat_projection_optimizer
+        )
+
+        if self.alignment_projection is not None:
+            self.alignment_projection_optimizer = torch.optim.Adam(
+                self.alignment_projection.parameters(),
+                lr=self.cfg.training.decoder_lr,
+            )
+            self.alignment_projection_optimizer = self.accelerator.prepare(
+                self.alignment_projection_optimizer
+            )
+        else:
+            self.alignment_projection_optimizer = None
+
+        self.report_trainable_modules()
+
+    def report_trainable_modules(self):
+        if not self.accelerator.is_main_process:
+            return
+        modules = [
+            ("encoder", self.encoder, self.encoder_optimizer),
+            ("predictor", self.predictor, getattr(self, "predictor_optimizer", None)),
+            ("post_concat_projection", self.post_concat_projection, self.post_concat_projection_optimizer),
+            ("emb_decoder", self.emb_decoder, self.emb_decoder_optimizer),
+            ("decoder", self.decoder, getattr(self, "decoder_optimizer", None)),
+            ("action_encoder", self.action_encoder, getattr(self, "action_encoder_optimizer", None)),
+            ("proprio_encoder", self.proprio_encoder, getattr(self, "action_encoder_optimizer", None)),
+            ("alignment_projection", self.alignment_projection, self.alignment_projection_optimizer),
+        ]
+        print("Trainable module status:")
+        for name, module, optimizer in modules:
+            if module is None:
+                print(f"- {name}: module=None")
+                continue
+            params = list(module.parameters())
+            trainable = [p for p in params if p.requires_grad]
+            has_optimizer = optimizer is not None
+            print(
+                f"- {name}: trainable_params={len(trainable)}/{len(params)}, "
+                f"optimizer={'yes' if has_optimizer else 'no'}"
+            )
+
+    def report_grad_presence(self):
+        if not self.accelerator.is_main_process or self._reported_grad_presence:
+            return
+        modules = [
+            ("encoder", self.encoder),
+            ("predictor", self.predictor),
+            ("post_concat_projection", self.post_concat_projection),
+            ("emb_decoder", self.emb_decoder),
+            ("decoder", self.decoder),
+            ("action_encoder", self.action_encoder),
+            ("proprio_encoder", self.proprio_encoder),
+            ("alignment_projection", self.alignment_projection),
+        ]
+        print("Gradient presence after backward:")
+        for name, module in modules:
+            if module is None:
+                print(f"- {name}: module=None")
+                continue
+            has_grad = any(p.grad is not None for p in module.parameters())
+            print(f"- {name}: grad={'yes' if has_grad else 'no'}")
+        self._reported_grad_presence = True
 
     def monitor_jobs(self, lock):
         """
@@ -701,17 +797,24 @@ class Trainer:
             self.encoder_optimizer.zero_grad()
             if self.cfg.has_decoder:
                 self.decoder_optimizer.zero_grad()
+                self.post_concat_projection_optimizer.zero_grad()
+            if self.alignment_projection_optimizer is not None:
+                self.alignment_projection_optimizer.zero_grad()
             if self.cfg.has_predictor:
                 self.predictor_optimizer.zero_grad()
                 self.action_encoder_optimizer.zero_grad()
 
             self.accelerator.backward(loss)
+            self.report_grad_presence()
 
             if self.model.train_encoder:
                 self.encoder_optimizer.step()
             if self.cfg.has_decoder and self.model.train_decoder:
                 self.decoder_optimizer.step()
                 self.emb_decoder_optimizer.step()
+                self.post_concat_projection_optimizer.step()
+            if self.alignment_projection_optimizer is not None:
+                self.alignment_projection_optimizer.step()
             if self.cfg.has_predictor and self.model.train_predictor:
                 self.predictor_optimizer.step()
                 self.action_encoder_optimizer.step()
@@ -727,10 +830,16 @@ class Trainer:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     # Use projected features like in forward pass
-                    z_gt, _ = self.model.encode(obs, act)  # Returns (64D projected features, z_dct)
-                    z_tgt = slice_trajdict_with_t({"projected": z_gt}, start_idx=self.model.num_pred)  # (b, num_hist, num_patches, 64)
-                    
-                    z_obs_out = {"projected": z_out}  # z_out is 64D projected features
+                    z_gt, _ = self.model.encode(obs, act)
+                    z_gt_projected = z_gt[:, :, :, :self.model.projected_dim]
+                    z_tgt = slice_trajdict_with_t(
+                        {"projected": z_gt_projected},
+                        start_idx=self.model.num_pred,
+                    )
+
+                    z_obs_out = {
+                        "projected": z_out[:, :, :, :self.model.projected_dim]
+                    }
 
                     state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
@@ -836,13 +945,15 @@ class Trainer:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     # Use projected features like in forward pass
-                    z_gt, _ = self.model.encode(obs, act)  # Returns (64D projected features, z_dct)
-                    z_tgt_tensor = z_gt[:, self.model.num_pred :, :, :]  # (b, num_hist, num_patches, 64)
+                    z_gt, _ = self.model.encode(obs, act)
+                    z_tgt_tensor = z_gt[
+                        :, self.model.num_pred :, :, : self.model.projected_dim
+                    ]
                     
-                    # Create dummy dictionary format for evaluation compatibility
-                    # Since we can't separate 64D projected features, treat as unified "visual"
-                    z_obs_out = {"visual": z_out}  # z_out is 64D projected features
-                    z_tgt = {"visual": z_tgt_tensor}  # z_tgt is 64D projected features
+                    z_obs_out = {
+                        "projected": z_out[:, :, :, : self.model.projected_dim]
+                    }
+                    z_tgt = {"projected": z_tgt_tensor}
 
                     state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)

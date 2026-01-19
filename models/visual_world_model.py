@@ -30,7 +30,12 @@ class VWorldModel(nn.Module):
         train_decoder_grad=True,
         projected_dim=64,
         predictor_dim=None,  # Will be computed as projected_dim + action_dim
+        raw_proprio_dim=0,
         alignment_dim=None,  # Number of dimensions for InfoNCE alignment (hyperparameter)
+        proprio_pred_loss_type="mse",
+        proprio_pred_space="raw",
+        proprio_infonce_temp=0.1,
+        open_alignment=False,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -47,6 +52,7 @@ class VWorldModel(nn.Module):
         self.train_decoder_grad = train_decoder_grad
         self.num_action_repeat = num_action_repeat
         self.num_proprio_repeat = num_proprio_repeat
+        self.raw_proprio_dim = raw_proprio_dim
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.alignment_dim = min(self.proprio_dim, projected_dim)
         self.action_dim = action_dim * num_action_repeat 
@@ -79,12 +85,12 @@ class VWorldModel(nn.Module):
         self.post_concat_projection = post_concat_projection
         
         # Compute predictor dimension dynamically  
-        self.predictor_dim = self.projected_dim + self.action_dim
+        self.predictor_dim = self.projected_dim + self.action_dim + self.raw_proprio_dim
         
         print(f"Concat emb_dim: {self.concat_emb_dim} (visual:{self.encoder.emb_dim} + proprio:{self.proprio_dim} + action:{self.action_dim})")
         print(f"Projection input: {self.projection_input_dim}D (visual:{self.encoder.emb_dim} + proprio:{self.proprio_dim})")
         print(f"After projection: {self.projected_dim}D (compressed visual+proprio)")
-        print(f"Final predictor input: {self.predictor_dim}D ({self.projected_dim}D projected + {self.action_dim}D action)")
+        print(f"Final predictor input: {self.predictor_dim}D ({self.projected_dim}D projected + {self.action_dim}D action + {self.raw_proprio_dim}D proprio)")
         print(f"InfoNCE alignment: {self.alignment_dim}D (first {self.alignment_dim} dims of projected features → state_dim from data)")
 
         if "dino" in self.encoder.name:
@@ -108,6 +114,11 @@ class VWorldModel(nn.Module):
         self.alignment_projection = alignment_projection  # nn.Linear: R^{alignment_dim} -> R^{state_dim}
         self.state_consistency_loss_weight = 1.0
         self.alignment_regularization = 1e-4  # L2 regularization on W
+        self.proprio_pred_loss_weight = 1.0
+        self.proprio_pred_loss_type = str(proprio_pred_loss_type).lower()
+        self.proprio_pred_space = str(proprio_pred_space).lower()
+        self.proprio_infonce_temp = proprio_infonce_temp
+        self.open_alignment = open_alignment
         
         # Conditional Flow KL divergence loss
         self.flow_kl_loss_weight = 1.0
@@ -149,24 +160,34 @@ class VWorldModel(nn.Module):
         """
         z_dct = self.encode_obs(obs)
         act_emb = self.encode_act(act)
+        raw_proprio = obs["proprio"]
         if self.concat_dim == 0:
             z_concat = torch.cat(
                     [z_dct['visual'], z_dct['proprio'].unsqueeze(2), act_emb.unsqueeze(2)], dim=2 # add as an extra token
                 )  # (b, num_frames, num_patches + 2, 384)
             # Apply projection only to visual + proprio (exclude action): 384D -> 64D
             z_visual_proprio = torch.cat([z_dct['visual'], z_dct['proprio'].unsqueeze(2)], dim=2)
-            z_projected = self.post_concat_projection(z_concat)  # (b, num_frames, num_patches + 1, 64)
-            return z_projected, z_dct
+            z_projected = self.post_concat_projection(z_concat)  # (b, num_frames, num_patches + 2, 64)
+            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_projected.shape[2])
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            raw_prop_tiled = repeat(
+                raw_proprio.unsqueeze(2), "b t 1 a -> b t f a", f=z_projected.shape[2]
+            )
+            z = torch.cat([z_projected, act_repeated, raw_prop_tiled], dim=3)
+            return z, z_dct
         if self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            raw_prop_tiled = repeat(
+                raw_proprio.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2]
+            )
             # lag_act_repeated = torch.zeros_like(act_repeated).to(act_repeated.device)
             # lag_act_repeated[:, 1:, :, :] = act_repeated[:, :-1, :, :]
             o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
             z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated) 
-            z = torch.cat([z_projected, act_repeated], dim=3) 
+            z = torch.cat([z_projected, act_repeated, raw_prop_tiled], dim=3) 
         return z, z_dct
     
     def encode_to_projected(self, obs, act):
@@ -338,14 +359,16 @@ class VWorldModel(nn.Module):
         z_obs = {"visual": z_visual, "proprio": z_proprio}
         return z_obs
     
-    def separate_s_a(self, z):
+    def separate_s_a_p(self, z):
         """
         input: z_pred (tensor)
-        output: state_pred (tensor), z_tgt (tensor)
+        output: state_pred (tensor), action_pred (tensor), proprio_pred (tensor)
         """
         state_pred = z[:, :, :, :self.projected_dim]
-        action_pred = z[:, :, :, self.projected_dim:]
-        return {'projected': state_pred, 'action': action_pred}
+        action_end = self.projected_dim + self.action_dim
+        action_pred = z[:, :, :, self.projected_dim:action_end]
+        proprio_pred = z[:, :, :, action_end:action_end + self.raw_proprio_dim]
+        return {"projected": state_pred, "action": action_pred, "proprio": proprio_pred}
 
     def infonce_loss(self, z_aligned, z_target, temperature=0.1):
         z_aligned_flat = z_aligned.reshape(-1, z_aligned.shape[-1])  # (b*num_hist, 7)
@@ -382,7 +405,7 @@ class VWorldModel(nn.Module):
             z_pred = self.predict(z_src)
             if self.decoder is not None:
                 b, num_frames, num_patches, emb_dim = z_pred.shape
-                z_pred_emb = self.emb_decoder(self.separate_s_a(z_pred)['projected'])
+                z_pred_emb = self.emb_decoder(self.separate_s_a_p(z_pred)['projected'])
                 visual_emb_tgt = z_dct['visual'][:, self.num_hist :, ...]
                 if self.train_decoder_grad:
                     obs_pred, diff_pred = self.decode(z_pred_emb)
@@ -401,12 +424,32 @@ class VWorldModel(nn.Module):
             else:
                 visual_pred = None
 
-            z_pred_projected = self.separate_s_a(z_pred)['projected']  
-            z_tgt_projected = self.separate_s_a(z_tgt)['projected']    
-            z_loss = self.emb_criterion(z_pred_projected, z_tgt_projected.detach())
+            z_pred_projected = self.separate_s_a_p(z_pred)['projected']
+            z_tgt_projected = self.separate_s_a_p(z_tgt)['projected']
+            z_loss = self.emb_criterion(z_pred_projected, z_tgt_projected)
 
             loss = loss + z_loss + decoder_loss_pred
             loss_components["z_predicted_loss"] = z_loss
+
+            if self.raw_proprio_dim > 0:
+                z_pred_parts = self.separate_s_a_p(z_pred)
+                proprio_pred = z_pred_parts["proprio"]
+                if self.concat_dim == 0:
+                    proprio_pred = proprio_pred[:, :, -2, :]
+                else:
+                    proprio_pred = proprio_pred.mean(dim=2)
+                proprio_tgt = obs["proprio"][:, self.num_pred :, :]
+                if self.proprio_pred_space == "emb":
+                    proprio_pred = self.proprio_encoder(proprio_pred)
+                    proprio_tgt = z_dct["proprio"][:, self.num_pred :, :]
+                if self.proprio_pred_loss_type == "infonce":
+                    proprio_loss = self.infonce_loss(
+                        proprio_pred, proprio_tgt, temperature=self.proprio_infonce_temp
+                    )
+                else:
+                    proprio_loss = self.emb_criterion(proprio_pred, proprio_tgt)
+                loss = loss + self.proprio_pred_loss_weight * proprio_loss
+                loss_components["proprio_pred_loss"] = proprio_loss
             
             # InfoNCE alignment approach: first alignment_dim of projected features → actual state dimension
             if state is not None:
@@ -437,7 +480,8 @@ class VWorldModel(nn.Module):
                 
                 # Total state consistency loss
                 state_consistency_loss = alignment_loss + w_regularization
-                loss = loss + self.state_consistency_loss_weight * state_consistency_loss
+                if self.open_alignment:
+                    loss = loss + self.state_consistency_loss_weight * state_consistency_loss
                 loss_components["state_consistency_loss"] = state_consistency_loss
                 loss_components["alignment_loss"] = alignment_loss
                 loss_components["w_regularization"] = w_regularization
@@ -472,7 +516,7 @@ class VWorldModel(nn.Module):
 
         if self.decoder is not None:
             # Following original DINO WM: pass full features to decoder
-            z_emb_reconstructed = self.emb_decoder(self.separate_s_a(z)['projected'])
+            z_emb_reconstructed = self.emb_decoder(self.separate_s_a_p(z)['projected'])
             if self.train_decoder_grad:
                 obs_reconstructed, diff_reconstructed = self.decode(z_emb_reconstructed)
             else:
@@ -511,11 +555,15 @@ class VWorldModel(nn.Module):
     def replace_actions_from_z(self, z, act):
         act_emb = self.encode_act(act)
         if self.concat_dim == 0:
-            z[:, :, -1, :] = act_emb
+            action_end = self.projected_dim + self.action_dim
+            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z.shape[2])
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            z[:, :, :, self.projected_dim:action_end] = act_repeated
         elif self.concat_dim == 1:
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z.shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            z[..., -self.action_dim:] = act_repeated
+            action_end = self.projected_dim + self.action_dim
+            z[..., self.projected_dim:action_end] = act_repeated
         return z
 
 
@@ -573,7 +621,7 @@ class VWorldModel(nn.Module):
         z_pred = self.predict(z[:, -self.num_hist :])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
-        z_dct = self.separate_s_a(z)
+        z_dct = self.separate_s_a_p(z)
 
         z_emb = self.emb_decoder(z_dct['projected'])
         z_obses = self.separate_emb(z_emb)

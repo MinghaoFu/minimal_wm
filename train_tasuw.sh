@@ -14,7 +14,12 @@ echo "🔍 Verifying environment..."
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
 
 # Set environment variables
-export HF_ENDPOINT=https://hf-mirror.com
+# Optional HF mirror: set USE_HF_MIRROR=1 to enable.
+if [ "${USE_HF_MIRROR:-}" = "1" ]; then
+    export HF_ENDPOINT=https://hf-mirror.com
+else
+    unset HF_ENDPOINT
+fi
 export HUGGINGFACE_HUB_CACHE=$HOME/.cache/huggingface
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
@@ -25,7 +30,7 @@ EPOCHS=${EPOCHS:-100}
 NUM_GPUS=${NUM_GPUS:-1}  
 GPU_IDS=${GPU_IDS:-"auto"}  
 RESUME=${RESUME:-""}  
-PROJECTED_DIM=${PROJECTED_DIM:-64}
+PROJECTED_DIM=${PROJECTED_DIM:-}
 ENV=${ENV:-""}
 DATASET_NAME=${DATASET_NAME:-""}
 ENV_OVERRIDE=""
@@ -125,7 +130,10 @@ fi
 echo "🎯 Starting full training..."
 
 # Set up training command with optional resume path
-TRAIN_ARGS="--config-name=$CONFIG_NAME training.epochs=$EPOCHS projected_dim=$PROJECTED_DIM"
+TRAIN_ARGS="--config-name=$CONFIG_NAME training.epochs=$EPOCHS"
+if [ -n "$PROJECTED_DIM" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS projected_dim=$PROJECTED_DIM"
+fi
 if [ -n "$ENV_OVERRIDE" ]; then
     TRAIN_ARGS="$TRAIN_ARGS env=$ENV_OVERRIDE"
 elif [ -n "$ENV" ]; then
@@ -137,7 +145,9 @@ elif [ -n "$ENV" ]; then
 if [ -n "$RESUME" ]; then
     echo "📂 Will resume from checkpoint: $RESUME"
     TRAIN_ARGS="$TRAIN_ARGS +saved_folder=$RESUME"
-    TRAIN_ARGS="$TRAIN_ARGS +projected_dim=$PROJECTED_DIM"
+    if [ -n "$PROJECTED_DIM" ]; then
+        TRAIN_ARGS="$TRAIN_ARGS +projected_dim=$PROJECTED_DIM"
+    fi
 fi
 
 # Function to copy models and specific config file after training starts (only for full training)
@@ -175,7 +185,6 @@ else
         --mixed_precision=no \
         train_tasuw.py \
         $TRAIN_ARGS \
-        training.batch_size=64  # Reduce batch size per GPU for multi-GPU
     TRAIN_PID=$!
 fi
 

@@ -53,9 +53,9 @@ class VAETemporalProjector(nn.Module):
 
     def __init__(
         self,
-        in_features,
-        out_features,
-        act_embed_dim,
+        in_features=None,
+        out_features=None,
+        act_embed_dim=0,
         use_history=False,
         num_hist=3,
         hidden_features=None,
@@ -63,8 +63,19 @@ class VAETemporalProjector(nn.Module):
         dropout=0.0,
         activation=nn.ReLU,
         sample_in_eval=False,
+        visual_emb_dim=None,
+        proprio_emb_dim=None,
+        projected_dim=None,
     ):
         super().__init__()
+        if in_features is None:
+            if visual_emb_dim is None or proprio_emb_dim is None:
+                raise ValueError("Provide in_features or both visual_emb_dim and proprio_emb_dim.")
+            in_features = visual_emb_dim + proprio_emb_dim
+        if out_features is None:
+            if projected_dim is None:
+                raise ValueError("Provide out_features or projected_dim.")
+            out_features = projected_dim
         self.in_features = in_features
         self.out_features = out_features
         self.act_embed_dim = act_embed_dim
@@ -120,8 +131,8 @@ class VAETemporalProjector(nn.Module):
 
     def forward(self, o, act=None):
         """
-        o:   (B, T, P, in_features)
-        act: (B, T, P, act_embed_dim)  [only used if use_history=True]
+        o:   (B, T, P, in_features) or visual_emb
+        act: (B, T, P, act_embed_dim) or proprio_emb when use_history=False
         return:
         z:   (B, T, P, out_features)
         """
@@ -164,7 +175,20 @@ class VAETemporalProjector(nn.Module):
             kl_per_elem = torch.cat(kl_elems, dim=1)  # (B, T, P)
         else:
             # Fast path: no history, just project each (B,T,P,Fin) independently
-            x = o  # (B, T, P, Fin)
+            if act is not None and o.shape[:-1] == act.shape[:-1]:
+                if o.shape[-1] + act.shape[-1] == self.in_features:
+                    x = torch.cat([o, act], dim=-1)
+                else:
+                    raise ValueError(
+                        f"Input feature mismatch: got {o.shape[-1]}+{act.shape[-1]}, "
+                        f"expected {self.in_features}."
+                    )
+            else:
+                if o.shape[-1] != self.in_features:
+                    raise ValueError(
+                        f"Input feature mismatch: got {o.shape[-1]}, expected {self.in_features}."
+                    )
+                x = o
             h = self.encoder(x)              # (B, T, P, Hf)
             mu = self.mu_head(h)             # (B, T, P, D)
             logvar = self.logvar_head(h)     # (B, T, P, D)
