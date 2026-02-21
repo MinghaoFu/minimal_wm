@@ -73,6 +73,9 @@ class ResBlockProjector(nn.Module):
         kernel_size=3,
         dropout=0.0,
         activation=nn.ReLU,
+        use_history=False,
+        num_hist=3,
+        act_embed_dim=None,
     ):
         super().__init__()
         if in_features is None:
@@ -87,6 +90,9 @@ class ResBlockProjector(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.projected_dim = out_features
+        self.use_history = use_history
+        self.num_hist = num_hist
+        self.act_embed_dim = act_embed_dim
 
         self.in_proj = nn.Conv1d(in_features, self.projected_dim, kernel_size=1)
         self.blocks = nn.Sequential(
@@ -107,20 +113,26 @@ class ResBlockProjector(nn.Module):
             else nn.Conv1d(self.projected_dim, out_features, kernel_size=1)
         )
 
-    def forward(self, x, proprio=None):
-        if proprio is not None and x.shape[:-1] == proprio.shape[:-1]:
-            if x.shape[-1] + proprio.shape[-1] != self.in_features:
+    def forward(self, visual_emb, proprio_emb=None, act=None):
+        if proprio_emb is None:
+            x = visual_emb
+        else:
+            if visual_emb.shape[:-1] != proprio_emb.shape[:-1]:
+                raise ValueError("visual_emb and proprio_emb must share batch/time/patch dims")
+            if visual_emb.shape[-1] + proprio_emb.shape[-1] != self.in_features:
                 raise ValueError(
-                    f"Input feature mismatch: got {x.shape[-1]}+{proprio.shape[-1]}, "
+                    f"Input feature mismatch: got {visual_emb.shape[-1]}+{proprio_emb.shape[-1]}, "
                     f"expected {self.in_features}."
                 )
-            x = torch.cat([x, proprio], dim=-1)
+            x = torch.cat([visual_emb, proprio_emb], dim=-1)
         if x.dim() == 4:
             B, T, P, C = x.shape
+            force_patch_dim = False
         elif x.dim() == 3:
-            B, P, C = x.shape
-            T = 1
-            x = x.unsqueeze(1)
+            B, T, C = x.shape
+            P = 1
+            x = x.unsqueeze(2)
+            force_patch_dim = True
         else:
             raise ValueError(f"Expected input with 3 or 4 dims, got {x.dim()}")
 
@@ -133,6 +145,4 @@ class ResBlockProjector(nn.Module):
         x = self.out_proj(x)
         x = x.reshape(B, T, self.out_features, P).permute(0, 1, 3, 2)
 
-        if T == 1:
-            x = x.squeeze(1)
         return x

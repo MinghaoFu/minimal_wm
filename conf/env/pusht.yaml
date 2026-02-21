@@ -17,3 +17,7 @@ dataset:
 
 decoder_path: null
 num_workers: 16
+
+# faster validation for large pusht dataset
+val_every_x_steps: 200
+val_max_batches: 20

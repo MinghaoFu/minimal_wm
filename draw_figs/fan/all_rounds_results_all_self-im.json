@@ -1,0 +1,12 @@
+[
+  {"round": 0, "strategy": "self-improvement(vanilla)", "macro_mse": 1.90},
+  {"round": 1, "strategy": "self-improvement(vanilla)", "macro_mse": 1.55},
+  {"round": 2, "strategy": "self-improvement(vanilla)", "macro_mse": 1.35},
+  {"round": 3, "strategy": "self-improvement(vanilla)", "macro_mse": 1.22},
+  {"round": 4, "strategy": "self-improvement(vanilla)", "macro_mse": 1.15},
+  {"round": 0, "strategy": "self-improvement(ours)", "macro_mse": 1.90},
+  {"round": 1, "strategy": "self-improvement(ours)", "macro_mse": 1.35},
+  {"round": 2, "strategy": "self-improvement(ours)", "macro_mse": 1.10},
+  {"round": 3, "strategy": "self-improvement(ours)", "macro_mse": 0.98},
+  {"round": 4, "strategy": "self-improvement(ours)", "macro_mse": 0.92}
+]

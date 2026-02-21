@@ -4,3 +4,5 @@ num_blocks: 2
 kernel_size: 3
 dropout: 0.1
 activation: ReLU
+use_history: false
+num_hist: 3

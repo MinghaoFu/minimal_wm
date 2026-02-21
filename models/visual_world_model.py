@@ -28,6 +28,7 @@ class VWorldModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         train_decoder_grad=True,
+        train_emb_decoder_grad=True,
         projected_dim=64,
         predictor_dim=None,  # Will be computed as projected_dim + action_dim
         raw_proprio_dim=0,
@@ -50,6 +51,7 @@ class VWorldModel(nn.Module):
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
         self.train_decoder_grad = train_decoder_grad
+        self.train_emb_decoder_grad = train_emb_decoder_grad
         self.num_action_repeat = num_action_repeat
         self.num_proprio_repeat = num_proprio_repeat
         self.raw_proprio_dim = raw_proprio_dim
@@ -83,6 +85,7 @@ class VWorldModel(nn.Module):
         # Projection input excludes action dimensions (visual + proprio only)
         self.projection_input_dim = self.encoder.emb_dim + self.proprio_dim  # 384 + 32 = 416
         self.post_concat_projection = post_concat_projection
+        self.identity_projector = isinstance(self.post_concat_projection, nn.Identity)
         
         # Compute predictor dimension dynamically  
         self.predictor_dim = self.projected_dim + self.action_dim + self.raw_proprio_dim
@@ -180,14 +183,15 @@ class VWorldModel(nn.Module):
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            raw_prop_tiled = repeat(
-                raw_proprio.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2]
-            )
-            # lag_act_repeated = torch.zeros_like(act_repeated).to(act_repeated.device)
-            # lag_act_repeated[:, 1:, :, :] = act_repeated[:, :-1, :, :]
-            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
-            z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated) 
-            z = torch.cat([z_projected, act_repeated, raw_prop_tiled], dim=3) 
+            if self.identity_projector:
+                z_projected = z_dct['visual']
+                z = torch.cat([z_projected, act_repeated, proprio_repeated], dim=3)
+            else:
+                raw_prop_tiled = repeat(
+                    raw_proprio.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2]
+                )
+                z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated)
+                z = torch.cat([z_projected, act_repeated, raw_prop_tiled], dim=3)
         return z, z_dct
     
     def encode_to_projected(self, obs, act):
@@ -200,13 +204,13 @@ class VWorldModel(nn.Module):
         elif self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
+            if self.identity_projector:
+                z_projected = z_dct['visual']
+                return {"projected": z_projected}
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            # lag_act_repeated = torch.zeros_like(act_repeated).to(act_repeated.device)
-            # lag_act_repeated[:, 1:, :, :] = act_repeated[:, :-1, :, :]
-            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
-            z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated) 
-            z = torch.cat([z_projected, act_repeated], dim=3) 
+            z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated)
+            z = torch.cat([z_projected, act_repeated], dim=3)
             return {"projected": z_projected}
         
     def encode_obs_projected(self, obs):
@@ -218,8 +222,10 @@ class VWorldModel(nn.Module):
         elif self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            o = torch.cat([z_dct['visual'], proprio_repeated], dim=3) 
-            z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated) 
+            if self.identity_projector:
+                z_projected = z_dct['visual']
+                return {"projected": z_projected}
+            z_projected = self.post_concat_projection(z_dct['visual'], proprio_repeated)
             return {"projected": z_projected}
         
     def encode_act(self, act):
@@ -413,7 +419,10 @@ class VWorldModel(nn.Module):
                     obs_pred, diff_pred = self.decode(z_pred_emb.detach())
                 visual_pred = obs_pred['visual']
                 recon_loss_pred = self.decoder_criterion(visual_pred, visual_tgt)
-                emb_recon_loss_pred = self.emb_decoder_criterion(z_pred_emb, visual_emb_tgt)
+                if self.train_emb_decoder_grad:
+                    emb_recon_loss_pred = self.emb_decoder_criterion(z_pred_emb, visual_emb_tgt)
+                else:
+                    emb_recon_loss_pred = self.emb_decoder_criterion(z_pred_emb.detach(), visual_emb_tgt)
                 decoder_loss_pred = (
                     recon_loss_pred + emb_recon_loss_pred + self.decoder_latent_loss_weight * diff_pred
                 )
@@ -431,7 +440,7 @@ class VWorldModel(nn.Module):
             loss = loss + z_loss + decoder_loss_pred
             loss_components["z_predicted_loss"] = z_loss
 
-            if self.raw_proprio_dim > 0:
+            if self.raw_proprio_dim > 0 and self.proprio_pred_loss_weight > 0:
                 z_pred_parts = self.separate_s_a_p(z_pred)
                 proprio_pred = z_pred_parts["proprio"]
                 if self.concat_dim == 0:
@@ -523,7 +532,10 @@ class VWorldModel(nn.Module):
                 obs_reconstructed, diff_reconstructed = self.decode(z_emb_reconstructed.detach())
             visual_reconstructed = obs_reconstructed["visual"]
             recon_loss_reconstructed = self.decoder_criterion(visual_reconstructed, obs['visual'])
-            emb_recon_loss_reconstructed = self.emb_decoder_criterion(z_emb_reconstructed, z_dct['visual'])
+            if self.train_emb_decoder_grad:
+                emb_recon_loss_reconstructed = self.emb_decoder_criterion(z_emb_reconstructed, z_dct['visual'])
+            else:
+                emb_recon_loss_reconstructed = self.emb_decoder_criterion(z_emb_reconstructed.detach(), z_dct['visual'])
             decoder_loss_reconstructed = (
                 recon_loss_reconstructed + emb_recon_loss_reconstructed
                 + self.decoder_latent_loss_weight * diff_reconstructed

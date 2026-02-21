@@ -7,8 +7,8 @@ This document contains the complete setup instructions for DINO World Model trai
 For new server setup, run this single command:
 
 ```bash
-chmod +x setup_and_prepare.sh
-./setup_and_prepare.sh
+chmod +x setup/03_full_setup.sh
+./setup/03_full_setup.sh
 ```
 
 **What it does automatically:**
@@ -21,7 +21,7 @@ chmod +x setup_and_prepare.sh
 - ✅ Updates configuration files with correct paths
 - ✅ Makes training scripts executable
 
-## 🔧 **Complete Setup Script** (setup_and_prepare.sh)
+## 🔧 **Complete Setup Script** (setup/03_full_setup.sh)
 
 ```bash
 #!/bin/bash
@@ -409,7 +409,7 @@ python train_robomimic_compress.py --config-name=train_robomimic_compress traini
 - **📁 Correct File Naming**: Fixed video files from `video_{i}.mp4` to `episode_{idx:05d}.mp4`
 - **🔧 Multi-GPU Training**: Successfully tested 2-GPU distributed training
 - **📦 Missing Package**: Added `decord` package for video processing
-- **🚀 Complete Automation**: Single command server setup with `./setup_and_prepare.sh`
+- **🚀 Complete Automation**: Single command server setup with `./setup/03_full_setup.sh`
 
 ✅ **Projected Latent Planning Implementation Complete**
 - **🎯 Architecture**: 80D projected latent architecture (64D projected + 16D action)
@@ -481,8 +481,8 @@ cd dino_wm
 
 2. **Run complete setup**:
 ```bash
-chmod +x setup_and_prepare.sh
-./setup_and_prepare.sh
+chmod +x setup/03_full_setup.sh
+./setup/03_full_setup.sh
 ```
 
 3. **Start training**:

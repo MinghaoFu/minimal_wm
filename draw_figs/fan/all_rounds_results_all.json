@@ -1,0 +1,7 @@
+[
+  {"round": 3, "strategy": "Random", "macro_mse": 1.85},
+  {"round": 3, "strategy": "Learning-Progress", "macro_mse": 1.55},
+  {"round": 3, "strategy": "Uncertainty", "macro_mse": 1.42},
+  {"round": 3, "strategy": "Hard-MSE", "macro_mse": 1.25},
+  {"round": 3, "strategy": "Forward-Inverse-Oracle", "macro_mse": 1.05}
+]
